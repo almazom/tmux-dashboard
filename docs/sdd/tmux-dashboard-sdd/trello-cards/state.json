@@ -1,28 +1,134 @@
 {
   "version": "1.0",
   "feature": "tmux-dashboard",
-  "overall_status": "NOT_STARTED",
+  "overall_status": "COMPLETE",
   "started_at": null,
-  "completed_at": null,
+  "completed_at": "2026-01-15T14:43:04Z",
   "current_card": null,
   "agent_session_id": null,
   "cards": {
-    "01": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "02": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "03": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "04": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "05": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "06": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "07": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "08": { "status": "pending", "started_at": null, "completed_at": null, "error": null },
-    "09": { "status": "pending", "started_at": null, "completed_at": null, "error": null }
+    "01": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:31:51Z",
+      "completed_at": "2026-01-15T14:31:51Z",
+      "error": null
+    },
+    "02": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:32:49Z",
+      "completed_at": "2026-01-15T14:32:49Z",
+      "error": null
+    },
+    "03": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:34:58Z",
+      "completed_at": "2026-01-15T14:34:58Z",
+      "error": null
+    },
+    "04": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:36:10Z",
+      "completed_at": "2026-01-15T14:36:10Z",
+      "error": null
+    },
+    "05": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:37:36Z",
+      "completed_at": "2026-01-15T14:37:36Z",
+      "error": null
+    },
+    "06": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:38:07Z",
+      "completed_at": "2026-01-15T14:38:07Z",
+      "error": null
+    },
+    "07": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:41:57Z",
+      "completed_at": "2026-01-15T14:41:57Z",
+      "error": null
+    },
+    "08": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:42:34Z",
+      "completed_at": "2026-01-15T14:42:34Z",
+      "error": null
+    },
+    "09": {
+      "status": "completed",
+      "started_at": "2026-01-15T14:43:04Z",
+      "completed_at": "2026-01-15T14:43:04Z",
+      "error": null
+    }
   },
   "progress": {
-    "completed": 0,
+    "completed": 9,
     "total": 9,
-    "percentage": 0,
-    "story_points_completed": 0,
+    "percentage": 100,
+    "story_points_completed": 24,
     "story_points_total": 24
   },
-  "execution_log": []
+  "execution_log": [
+    {
+      "timestamp": "2026-01-15T14:31:51Z",
+      "level": "INFO",
+      "message": "Card 01 completed",
+      "card": "01"
+    },
+    {
+      "timestamp": "2026-01-15T14:32:49Z",
+      "level": "INFO",
+      "message": "Card 02 completed",
+      "card": "02"
+    },
+    {
+      "timestamp": "2026-01-15T14:34:58Z",
+      "level": "INFO",
+      "message": "Card 03 completed",
+      "card": "03"
+    },
+    {
+      "timestamp": "2026-01-15T14:36:10Z",
+      "level": "INFO",
+      "message": "Card 04 completed",
+      "card": "04"
+    },
+    {
+      "timestamp": "2026-01-15T14:37:36Z",
+      "level": "INFO",
+      "message": "Card 05 completed",
+      "card": "05"
+    },
+    {
+      "timestamp": "2026-01-15T14:38:07Z",
+      "level": "INFO",
+      "message": "Card 06 completed",
+      "card": "06"
+    },
+    {
+      "timestamp": "2026-01-15T14:41:57Z",
+      "level": "INFO",
+      "message": "Card 07 completed",
+      "card": "07"
+    },
+    {
+      "timestamp": "2026-01-15T14:42:34Z",
+      "level": "INFO",
+      "message": "Card 08 completed",
+      "card": "08"
+    },
+    {
+      "timestamp": "2026-01-15T14:43:04Z",
+      "level": "INFO",
+      "message": "Card 09 completed",
+      "card": "09"
+    },
+    {
+      "timestamp": "2026-01-15T14:43:04Z",
+      "level": "INFO",
+      "message": "All cards completed",
+      "card": null
+    }
+  ]
 }
