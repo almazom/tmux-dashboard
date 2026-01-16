@@ -9,6 +9,7 @@ from typing import Optional
 
 from .config import Config
 from .logger import Logger
+from .models import SortMode
 from .tmux_manager import TmuxError, TmuxManager
 from .ui import DashboardUI, UiState, UiStatus
 
@@ -35,10 +36,13 @@ def run_dashboard(
             level = getattr(pending_status, "level", "info")
             status = UiStatus(message=message, level=level)
 
-        sessions, list_status = _safe_list_sessions(tmux, logger)
+        # Initialize sort mode from config
+        sort_mode = config.sort_mode
+        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
         if list_status:
             status = list_status
         selected_index = 0
+        last_attached_session: str | None = None  # Track last attached session
         filter_text = ""
         in_search = False
         help_visible = False
@@ -67,6 +71,7 @@ def run_dashboard(
                 help_visible=help_visible,
                 status=status,
                 preview=preview.windows if preview else None,
+                sort_mode=sort_mode,
             )
             ui.render(state, config.preview_lines)
 
@@ -110,17 +115,36 @@ def run_dashboard(
                 if filtered:
                     # Handle attach within the curses context
                     session_name = filtered[selected_index].name
-                    _do_attach(stdscr, tmux, session_name, logger)
+                    last_attached_session = session_name  # Remember which session we attached to
+                    actual_session_name = _do_attach(stdscr, tmux, session_name, logger)
+                    # Update last_attached_session with the new name if it was renamed
+                    last_attached_session = actual_session_name or session_name
                     # Refresh session list after returning from attach
-                    sessions, list_status = _safe_list_sessions(tmux, logger)
-                    status = list_status or UiStatus(f"Returned from {session_name}", level="info")
-                    # Reset to first session
-                    selected_index = 0
+                    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                    status = list_status or UiStatus(f"Returned from {last_attached_session}", level="info")
+                    # Re-apply filter and restore cursor to the session we just detached from
+                    filtered = _filter_sessions(sessions, filter_text)
+                    if last_attached_session:
+                        new_index = _find_session_index(filtered, last_attached_session)
+                        # Debug: log if we couldn't find the session
+                        session_names = [s.name for s in filtered]
+                        if new_index == 0 and filtered and filtered[0].name != last_attached_session:
+                            # Session not found, log for debugging
+                            logger.warn("cursor_restore", f"Session '{last_attached_session}' not found in filtered list: {session_names}")
+                        selected_index = new_index
+                    else:
+                        selected_index = 0
                     continue
                 status = UiStatus("No sessions to attach", level="warning")
                 continue
             if key == ord("n"):
-                name = _prompt_input_popup(stdscr, "New tmux session")
+                # Get project name as default suggestion
+                project_name = tmux.detect_project_name()
+                # Generate unique name if project name already exists
+                existing_names = {s.name for s in sessions}
+                default_name = project_name if project_name not in existing_names else project_name
+
+                name = _prompt_input_popup(stdscr, "New tmux session", default=default_name)
                 if name:
                     return Action(kind="create", session_name=name)
                 status = UiStatus("Create canceled", level="warning")
@@ -148,7 +172,7 @@ def run_dashboard(
                     try:
                         tmux.kill_session(target.name)
                         logger.info("delete", "session deleted", target.name)
-                        sessions, list_status = _safe_list_sessions(tmux, logger)
+                        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
                         status = list_status or UiStatus("Session deleted", level="info")
                     except TmuxError as exc:
                         logger.error("delete", str(exc), target.name)
@@ -166,7 +190,7 @@ def run_dashboard(
                     try:
                         tmux.rename_session(target.name, new_name)
                         logger.info("rename", f"renamed {target.name} to {new_name}")
-                        sessions, list_status = _safe_list_sessions(tmux, logger)
+                        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
                         status = list_status or UiStatus("Session renamed", level="info")
                     except TmuxError as exc:
                         logger.error("rename", str(exc), target.name)
@@ -180,8 +204,20 @@ def run_dashboard(
                 return Action(kind="exit")
 
             if key == ord("r"):
-                sessions, list_status = _safe_list_sessions(tmux, logger)
+                sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
                 status = list_status or UiStatus("Session list refreshed", level="info")
+                continue
+
+            if key == ord("s"):
+                # Cycle to next sort mode
+                new_mode = sort_mode.next_mode()
+                sort_mode = new_mode
+                # Save to config
+                config.save_sort_mode(new_mode)
+                # Re-sort sessions
+                sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                status = list_status or UiStatus(f"Sort mode: {new_mode.label} ({new_mode.description})", level="info")
+                selected_index = 0  # Reset to top after re-sort
                 continue
 
         return None
@@ -189,8 +225,12 @@ def run_dashboard(
     return curses.wrapper(_main)
 
 
-def _do_attach(stdscr: "curses._CursesWindow", tmux: TmuxManager, session_name: str, logger: Logger) -> None:
-    """Attach to a tmux session within the curses context."""
+def _do_attach(stdscr: "curses._CursesWindow", tmux: TmuxManager, session_name: str, logger: Logger) -> Optional[str]:
+    """Attach to a tmux session within the curses context.
+
+    Returns:
+        The new session name if it was renamed, otherwise the original name.
+    """
     # End curses mode temporarily
     curses.endwin()
 
@@ -202,6 +242,11 @@ def _do_attach(stdscr: "curses._CursesWindow", tmux: TmuxManager, session_name: 
     except OSError as exc:
         logger.error("attach", str(exc), session_name)
     finally:
+        # Auto-rename session to project folder name on detach
+        new_name = tmux.rename_session_to_project(session_name)
+        if new_name:
+            logger.info("rename", f"auto-renamed session from {session_name} to {new_name}")
+
         # Reinitialize curses after returning
         curses.doupdate()
         # Clear and refresh the screen
@@ -219,10 +264,13 @@ def _do_attach(stdscr: "curses._CursesWindow", tmux: TmuxManager, session_name: 
         except curses.error:
             pass
 
+        # Return the actual session name (new or original)
+        return new_name or session_name
 
-def _safe_list_sessions(tmux: TmuxManager, logger: Logger) -> tuple[list, Optional[UiStatus]]:
+
+def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode = SortMode.DEFAULT) -> tuple[list, Optional[UiStatus]]:
     try:
-        return tmux.list_sessions(), None
+        return tmux.list_sessions(sort_mode), None
     except TmuxError as exc:
         logger.error("session_list", str(exc))
         return [], UiStatus(str(exc), level="error")
@@ -239,6 +287,14 @@ def _clamp_index(index: int, length: int) -> int:
     if length <= 0:
         return 0
     return max(0, min(index, length - 1))
+
+
+def _find_session_index(sessions: list, session_name: str) -> int:
+    """Find the index of a session by name in the session list."""
+    for idx, session in enumerate(sessions):
+        if session.name == session_name:
+            return idx
+    return 0  # Default to first session if not found
 
 
 def _prompt_input(stdscr: "curses._CursesWindow", prompt: str) -> Optional[str]:
@@ -281,7 +337,7 @@ def _prompt_input(stdscr: "curses._CursesWindow", prompt: str) -> Optional[str]:
     return value or None
 
 
-def _prompt_input_popup(stdscr: "curses._CursesWindow", title: str) -> Optional[str]:
+def _prompt_input_popup(stdscr: "curses._CursesWindow", title: str, default: str = "") -> Optional[str]:
     height, width = stdscr.getmaxyx()
     try:
         curses.curs_set(1)
@@ -292,7 +348,8 @@ def _prompt_input_popup(stdscr: "curses._CursesWindow", title: str) -> Optional[
     prompt = "Enter session name:"
     help_text = "Enter=confirm  Esc=cancel"
 
-    buffer: list[str] = []
+    # Initialize buffer with default value
+    buffer: list[str] = list(default)
 
     while True:
         # Clear center area

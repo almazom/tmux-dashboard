@@ -3,12 +3,10 @@
 Config path default: ~/.config/tmux-dashboard/config.json
 """
 
-from .app import run
+import sys
 
-
-def main() -> None:
-    run()
+from .app import main as _main
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(_main())

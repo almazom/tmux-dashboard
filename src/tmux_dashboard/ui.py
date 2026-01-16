@@ -6,7 +6,7 @@ import curses
 from dataclasses import dataclass
 from typing import Optional
 
-from .models import SessionInfo, WindowInfo
+from .models import SessionInfo, SortMode, WindowInfo
 
 
 @dataclass
@@ -24,6 +24,7 @@ class UiState:
     help_visible: bool
     status: Optional[UiStatus]
     preview: Optional[list[WindowInfo]]
+    sort_mode: SortMode = SortMode.DEFAULT
 
 
 # Margin settings (top, left) - in terminal cells
@@ -88,7 +89,7 @@ class DashboardUI:
         content_width = max(1, width - MARGIN_LEFT * 2)
         content_height = max(1, height - MARGIN_TOP * 2)
 
-        self._draw_title(content_top, content_left, content_width)
+        self._draw_title(state, content_top, content_left, content_width)
         list_top = content_top + 2
         list_bottom = max(content_top + 3, content_top + content_height - 3)
         list_height = list_bottom - list_top + 1
@@ -104,10 +105,12 @@ class DashboardUI:
 
         self.stdscr.refresh()
 
-    def _draw_title(self, top: int, left: int, width: int) -> None:
+    def _draw_title(self, state: UiState, top: int, left: int, width: int) -> None:
         title = "Tmux Dashboard"
-        hint = "[F1 Help] [q Exit]"
-        line = f"{title} {' ' * max(1, width - len(title) - len(hint) - 2)}{hint}"
+        # Show current sort mode in title
+        sort_indicator = f"[Sort: {state.sort_mode.label}]"
+        hint = "[F1 Help] [s Sort] [q Exit]"
+        line = f"{title} {sort_indicator} {' ' * max(1, width - len(title) - len(sort_indicator) - len(hint) - 4)}{hint}"
         self._addstr(top, left, line[: width - 1], self._attr("title"))
 
     def _draw_sessions(self, state: UiState, top: int, height: int, width: int, left: int) -> None:
@@ -169,7 +172,7 @@ class DashboardUI:
             self._addstr(top + idx, left, line[: max(1, width - left - 1)])
 
     def _draw_footer(self, state: UiState, height: int, width: int, left: int) -> None:
-        footer = "Keys: Up/Down move  Enter attach  n new  d delete  R rename  / search  r refresh"
+        footer = f"Keys: Up/Down move  Enter attach  n new  d delete  R rename  / search  r refresh  s sort [{state.sort_mode.label}]"
         if state.in_search:
             footer = f"Search: {state.filter_text} (Esc to clear)"
         elif state.help_visible:
@@ -192,6 +195,7 @@ class DashboardUI:
             "d: delete session",
             "/: search",
             "r: refresh",
+            "s: cycle sort mode",
             "F1 or ?: help",
             "q / Ctrl+C: exit",
         ]

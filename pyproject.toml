@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tmux-dashboard"
+version = "0.1.0"
+description = "A curses-based Tmux session manager with AI session detection"
+readme = "docs/sdd/tmux-dashboard-sdd/README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Almaz"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console :: Curses",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Terminal",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "libtmux>=0.8.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "black>=23.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+tmux-dashboard = "tmux_dashboard.app:main"
+
+[project.urls]
+Homepage = "https://github.com/almaz/tmux-dashboard"
+Repository = "https://github.com/almaz/tmux-dashboard"
+Issues = "https://github.com/almaz/tmux-dashboard/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.black]
+line-length = 100
+target-version = ['py38', 'py39', 'py310', 'py311']
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = ["E501"]

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Optional
 
@@ -24,6 +26,29 @@ def run() -> None:
     tmux = TmuxManager()
 
     pending_status: Optional[PendingStatus] = None
+
+    # Auto-create flow: Check if no sessions exist and auto_create is enabled
+    if config.auto_create:
+        try:
+            sessions = tmux.list_sessions()
+            if not sessions:
+                # No sessions exist - auto-create and attach using project name
+                session_name = tmux.generate_session_name(sessions)
+                logger.info("auto_create", f"auto-creating session: {session_name}")
+                try:
+                    tmux.create_session(session_name)
+                    logger.info("auto_create", f"session created: {session_name}")
+                    # Attach directly to the new session, bypassing dashboard
+                    logger.info("auto_create", f"auto-attaching to session: {session_name}")
+                    subprocess.run(tmux.attach_command(session_name))
+                    # After detach, rename to project folder name
+                    tmux.rename_session_to_project(session_name)
+                except TmuxError as exc:
+                    logger.error("auto_create", str(exc), session_name)
+                    pending_status = PendingStatus(str(exc), level="error")
+        except TmuxError as exc:
+            logger.error("auto_create", f"failed to list sessions: {exc}")
+            # Fall through to normal dashboard
 
     while True:
         action = run_dashboard(tmux, config, logger, pending_status)
@@ -53,3 +78,60 @@ def run() -> None:
                 logger.error("attach", str(exc), action.session_name)
 
     return None
+
+
+def main() -> int:
+    """Main entry point for the CLI."""
+    parser = argparse.ArgumentParser(
+        prog="tmux-dashboard",
+        description="A curses-based Tmux session manager with AI session detection",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  tmux-dashboard              # Launch the dashboard
+  tmux-dashboard --help        # Show this help message
+  tmux-dashboard --version     # Show version
+
+Environment Variables:
+  TMUX_DASHBOARD_CONFIG       Path to config file (default: ~/.config/tmux-dashboard/config.json)
+  TMUX_DASHBOARD_LOG          Path to log file (default: ~/.local/state/tmux-dashboard/log.jsonl)
+  TMUX_DASHBOARD_COLOR        Color mode: auto/never/always (default: auto)
+  TMUX_DASHBOARD_SORT_MODE    Sort mode: activity/name/ai_first/windows_count (default: ai_first)
+  TMUX_DASHBOARD_DRY_RUN      Set to 1/true/yes to enable dry-run mode (blocks delete)
+
+Keybindings in Dashboard:
+  Up/Down      Navigate sessions
+  Enter        Attach to session
+  n            Create new session
+  d            Delete session
+  R            Rename session
+  r            Refresh list
+  s            Cycle sort modes
+  /            Search
+  F1 or ?      Show help
+  q or Ctrl+C  Exit
+        """,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s 0.1.0"
+    )
+
+    # Parse args - currently no runtime args, just help/version
+    args = parser.parse_args()
+
+    try:
+        run()
+        return 0
+    except KeyboardInterrupt:
+        print("\nInterrupted by user", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

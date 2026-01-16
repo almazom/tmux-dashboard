@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
-from .models import PaneInfo, SessionInfo, WindowInfo
+from .models import PaneInfo, SessionInfo, SortMode, WindowInfo
 
 
 # Keywords to detect AI agent sessions
@@ -41,6 +43,67 @@ class SessionDetails:
 class TmuxManager:
     def __init__(self) -> None:
         self._libtmux = libtmux
+        self._cached_project_name: Optional[str] = None
+
+    def detect_project_name(self) -> str:
+        """Detect project name from current working directory.
+
+        Strategy:
+        1. If current directory has .git, use directory name
+        2. Walk up parents until .git found, use that directory name
+        3. If no .git found, use current directory name
+        4. If in home directory, use 'default'
+        """
+        if self._cached_project_name:
+            return self._cached_project_name
+
+        cwd = Path.cwd()
+        home = Path.home()
+
+        # Check if we're in home directory (not in a project)
+        try:
+            if cwd == home or str(cwd).startswith(str(home) + "/") and len(cwd.relative_to(home).parts) <= 1:
+                self._cached_project_name = "default"
+                return self._cached_project_name
+        except ValueError:
+            pass
+
+        # Walk up to find .git folder
+        current = cwd
+        while current != home and current != current.parent:
+            if (current / ".git").exists():
+                self._cached_project_name = current.name
+                return self._cached_project_name
+            current = current.parent
+
+        # No .git found, use current directory name
+        self._cached_project_name = cwd.name
+        return self._cached_project_name
+
+    def generate_session_name(self, existing_sessions: list[SessionInfo]) -> str:
+        """Generate a unique session name based on project folder.
+
+        Rules:
+        1. Use project folder name as base
+        2. If exists, append incrementing number
+        3. Handle edge cases gracefully
+        """
+        base_name = self.detect_project_name()
+        existing_names = {s.name for s in existing_sessions}
+
+        # If base name is available, use it
+        if base_name not in existing_names:
+            return base_name
+
+        # Try incrementing numbers
+        for i in range(2, 100):
+            candidate = f"{base_name}-{i}"
+            if candidate not in existing_names:
+                return candidate
+
+        # Fallback: use timestamp
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        return f"{base_name}-{timestamp}"
 
     def _server(self):
         if not self._libtmux:
@@ -50,10 +113,10 @@ class TmuxManager:
         except Exception as exc:  # pragma: no cover - defensive
             raise TmuxError(f"tmux server unavailable: {exc}") from exc
 
-    def list_sessions(self) -> list[SessionInfo]:
+    def list_sessions(self, sort_mode: SortMode = SortMode.DEFAULT) -> list[SessionInfo]:
         sessions = self._get_sessions_raw()
 
-        # Detect AI sessions and sort them to the top
+        # Detect AI sessions and enrich session info
         sessions_with_ai = []
         for session in sessions:
             is_ai = self._is_ai_session(session.name)
@@ -66,11 +129,26 @@ class TmuxManager:
                 )
             )
 
-        # Sort: AI sessions first, then by name
-        return sorted(
-            sessions_with_ai,
-            key=lambda s: (not s.is_ai_session, s.name.lower()),
-        )
+        # Sort based on the selected mode
+        return self._sort_sessions(sessions_with_ai, sort_mode)
+
+    def _sort_sessions(self, sessions: list[SessionInfo], mode: SortMode) -> list[SessionInfo]:
+        """Sort sessions according to the specified mode."""
+        if mode == SortMode.NAME:
+            # Alphabetical A→Z
+            return sorted(sessions, key=lambda s: s.name.lower())
+        elif mode == SortMode.ACTIVITY:
+            # Active/attached first, then by name
+            return sorted(sessions, key=lambda s: (not s.attached, s.name.lower()))
+        elif mode == SortMode.AI_FIRST:
+            # AI sessions first, then by name
+            return sorted(sessions, key=lambda s: (not s.is_ai_session, s.name.lower()))
+        elif mode == SortMode.WINDOWS_COUNT:
+            # Most windows first, then by name
+            return sorted(sessions, key=lambda s: (-s.windows, s.name.lower()))
+        else:
+            # Default to AI_FIRST
+            return sorted(sessions, key=lambda s: (not s.is_ai_session, s.name.lower()))
 
     def _get_sessions_raw(self) -> list[SessionInfo]:
         if self._libtmux:
@@ -169,6 +247,44 @@ class TmuxManager:
             return ["tmux", "switch-client", "-t", name]
         # Not inside tmux - use attach-session
         return ["tmux", "attach-session", "-t", name]
+
+    def rename_session_to_project(self, session_name: str) -> Optional[str]:
+        """Rename a session to match the current working directory's basename.
+
+        Returns:
+            The new name if renamed, None if failed or no change needed.
+        """
+        try:
+            # Get current working directory basename
+            cwd = Path.cwd()
+            new_name = cwd.name
+
+            # Don't rename if already has this name
+            if session_name == new_name:
+                return None
+
+            # Use libtmux if available
+            if self._libtmux:
+                server = self._server()
+                if server:
+                    session = server.sessions.get(session_name=session_name)
+                    if session:
+                        session.rename_session(new_name)
+                        return new_name
+
+            # CLI fallback
+            result = subprocess.run(
+                ["tmux", "rename-session", "-t", session_name, new_name],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                return new_name
+
+        except Exception:
+            pass
+
+        return None
 
     def kill_session(self, name: str) -> None:
         if self._libtmux:
