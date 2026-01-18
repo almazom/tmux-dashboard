@@ -6,6 +6,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LOCK_DIR="$(mktemp -d)"
+export TMUX_DASHBOARD_LOCK_FILE="$LOCK_DIR/lock"
+export TMUX_DASHBOARD_PID_FILE="$LOCK_DIR/pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -209,9 +212,8 @@ with ensure_single_instance():
 # Clean up function
 cleanup() {
     log_info "Cleaning up test environment..."
-    pkill -f "tmux_dashboard" 2>/dev/null || true
     sleep 0.5
-    rm -rf ~/.local/state/tmux-dashboard/ 2>/dev/null || true
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 
 # Main execution

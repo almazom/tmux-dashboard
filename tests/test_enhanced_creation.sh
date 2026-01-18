@@ -5,6 +5,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+LOCK_DIR="$(mktemp -d)"
+export TMUX_DASHBOARD_LOCK_FILE="$LOCK_DIR/lock"
+export TMUX_DASHBOARD_PID_FILE="$LOCK_DIR/pid"
 
 # Colors for output
 RED='\033[0;31m'
@@ -167,12 +170,12 @@ print('✓ Auto-create functionality enhanced with cd support')
 # Clean up function
 cleanup() {
     log_info "Cleaning up test sessions..."
-    pkill -f "tmux_dashboard" 2>/dev/null || true
     sleep 0.5
     # Clean up any test sessions that might be left
     for session in $(tmux list-sessions -F '#S' 2>/dev/null | grep -E "^test-(cd|dir|custom|integration)" || true); do
         tmux kill-session -t "$session" 2>/dev/null || true
     done
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 
 # Main execution

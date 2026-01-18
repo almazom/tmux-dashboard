@@ -9,7 +9,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-LOCK_DIR="$HOME/.local/state/tmux-dashboard"
+LOCK_DIR="$(mktemp -d)"
+export TMUX_DASHBOARD_LOCK_FILE="$LOCK_DIR/lock"
+export TMUX_DASHBOARD_PID_FILE="$LOCK_DIR/pid"
 export PYTHONPATH="$PROJECT_ROOT/src"
 
 # Colors for output
@@ -86,11 +88,9 @@ setup_test_environment() {
 cleanup_test_environment() {
     log_info "Cleaning up test environment..."
 
-    # Kill any tmux-dashboard processes from tests
-    pkill -f "tmux_dashboard" 2>/dev/null || true
-
     # Clean up lock files
     rm -f "$LOCK_DIR"/lock "$LOCK_DIR"/pid 2>/dev/null || true
+    mkdir -p "$LOCK_DIR"
 
     # Wait for processes to fully terminate
     sleep 0.5
@@ -391,6 +391,7 @@ main() {
     show_test_summary
 
     cleanup_test_environment
+    rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 
 # Handle script interruption
