@@ -44,6 +44,22 @@ class TestInstanceLock(unittest.TestCase):
         self.lock.release()
         self.assertFalse(self.lock.is_locked())
 
+    def test_env_override_paths(self):
+        """Test that environment variables override default lock paths."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            lock_path = Path(temp_dir) / "env_lock"
+            pid_path = Path(temp_dir) / "env_pid"
+            with patch.dict(
+                os.environ,
+                {
+                    "TMUX_DASHBOARD_LOCK_FILE": str(lock_path),
+                    "TMUX_DASHBOARD_PID_FILE": str(pid_path),
+                },
+            ):
+                lock = InstanceLock(lock_file=None, pid_file=None, timeout=0.1)
+                self.assertEqual(lock.lock_file, lock_path)
+                self.assertEqual(lock.pid_file, pid_path)
+
     def test_double_acquire_fails(self):
         """Test that acquiring the same lock twice fails."""
         self.assertTrue(self.lock.acquire())
