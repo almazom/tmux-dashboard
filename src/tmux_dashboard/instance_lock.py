@@ -24,8 +24,19 @@ from typing import Optional
 # Lock file location
 DEFAULT_LOCK_FILE = Path.home() / ".local" / "state" / "tmux-dashboard" / "lock"
 DEFAULT_PID_FILE = Path.home() / ".local" / "state" / "tmux-dashboard" / "pid"
+ENV_LOCK_FILE = "TMUX_DASHBOARD_LOCK_FILE"
+ENV_PID_FILE = "TMUX_DASHBOARD_PID_FILE"
 _PROCESS_LOCK = threading.Lock()
 _PROCESS_LOCK_HELD = False
+
+
+def _resolve_path(value: Optional[Path], env_var: str, default: Path) -> Path:
+    if value is not None:
+        return value
+    env_value = os.environ.get(env_var)
+    if env_value:
+        return Path(env_value).expanduser()
+    return default
 
 
 class InstanceLockError(Exception):
@@ -69,8 +80,8 @@ class InstanceLock:
             pid_file: Path to the PID file (defaults to ~/.local/state/tmux-dashboard/pid)
             timeout: Maximum time to wait for lock acquisition in seconds
         """
-        self.lock_file = lock_file or DEFAULT_LOCK_FILE
-        self.pid_file = pid_file or DEFAULT_PID_FILE
+        self.lock_file = _resolve_path(lock_file, ENV_LOCK_FILE, DEFAULT_LOCK_FILE)
+        self.pid_file = _resolve_path(pid_file, ENV_PID_FILE, DEFAULT_PID_FILE)
         self.timeout = timeout
         self._lock_fd: Optional[int] = None
         self._pid: Optional[int] = None
@@ -402,8 +413,8 @@ def cleanup_stale_locks(lock_file: Optional[Path] = None, pid_file: Optional[Pat
     Returns:
         bool: True if cleanup was successful, False otherwise
     """
-    lock_file = lock_file or DEFAULT_LOCK_FILE
-    pid_file = pid_file or DEFAULT_PID_FILE
+    lock_file = _resolve_path(lock_file, ENV_LOCK_FILE, DEFAULT_LOCK_FILE)
+    pid_file = _resolve_path(pid_file, ENV_PID_FILE, DEFAULT_PID_FILE)
 
     cleanup_successful = True
 
