@@ -24,6 +24,7 @@ class UiState:
     help_visible: bool
     status: Optional[UiStatus]
     preview: Optional[list[WindowInfo]]
+    pane_capture: Optional[list[str]] = None
     sort_mode: SortMode = SortMode.DEFAULT
 
 
@@ -125,12 +126,17 @@ class DashboardUI:
         for idx, session in enumerate(sessions[start:end], start=start):
             row = top + (idx - start) * (1 + LINE_SPACING)
 
+            # Number prefix for quick attach (only show for first 9)
+            if idx < 9:
+                num_prefix = f"{idx + 1}. "
+            else:
+                num_prefix = "  "
             # AI indicator
             ai_prefix = "🤖 " if session.is_ai_session else ""
             name = ai_prefix + session.name
             status = "attached" if session.attached else "detached"
             windows = f"windows: {session.windows}"
-            label = f"{name:<18} [{status:<8}] {windows}"
+            label = f"{num_prefix}{name:<18} [{status:<8}] {windows}"
 
             attr = 0
             if idx == state.selected_index:
@@ -156,23 +162,35 @@ class DashboardUI:
         if left >= width - 2:
             return
 
-        self._addstr(top, left, "Preview:")
+        self._addstr(top, left, "Live Preview:", self._attr("title"))
+
+        # Show captured pane content if available
+        if state.pane_capture:
+            lines = state.pane_capture
+            max_lines = min(preview_lines - 1, height - 2)
+            for idx, line in enumerate(lines[:max_lines], start=1):
+                # Truncate long lines for preview
+                display_line = line[: max(0, width - left - 3)]
+                self._addstr(top + idx, left, display_line)
+            return
+
+        # Fallback to window info preview
         lines: list[str] = []
         if state.preview:
             for window in state.preview:
-                lines.append(f"- window: {window.name}")
+                lines.append(f"window: {window.name}")
                 for pane in window.panes:
-                    cmd = pane.current_command or ""
-                    lines.append(f"  - pane: {cmd}")
+                    cmd = pane.current_command or "(empty)"
+                    lines.append(f"  {cmd}")
         else:
-            lines.append("No preview available")
+            lines.append("(no preview)")
 
         max_lines = min(preview_lines, height - 2)
         for idx, line in enumerate(lines[:max_lines], start=1):
             self._addstr(top + idx, left, line[: max(1, width - left - 1)])
 
     def _draw_footer(self, state: UiState, height: int, width: int, left: int) -> None:
-        footer = f"Keys: Up/Down move  Enter attach  n new  d delete  R rename  / search  r refresh  s sort [{state.sort_mode.label}]"
+        footer = f"Keys: 1-9 quick attach  Up/Down move  Enter attach  n new  d delete  R rename  / search  r refresh  s sort [{state.sort_mode.label}]"
         if state.in_search:
             footer = f"Search: {state.filter_text} (Esc to clear)"
         elif state.help_visible:
@@ -190,6 +208,7 @@ class DashboardUI:
     def _draw_help_overlay(self, width: int, height: int) -> None:
         lines = [
             "Help",
+            "1-9: quick attach to session",
             "Enter: attach",
             "n: create new session",
             "d: delete session",
