@@ -42,6 +42,9 @@ SSH Login → zsh auto-start → Dashboard render → Action selection
 - [ ] Add dry-run guard for destructive actions (delete)
 - [ ] Follow module split: `tmux_manager`, `ui`, `input_handler`, `app`
 - [ ] Location: `src/tmux_dashboard/`
+- [ ] **CRITICAL**: Implement single instance enforcement to prevent race conditions
+- [ ] Add file-based locking mechanism for concurrent instance protection
+- [ ] Handle auto-create race condition in `app.py:30-51`
 
 ## Implementation
 

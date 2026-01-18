@@ -94,6 +94,8 @@
 
 - При отсутствии tmux сервера система MUST показывать пустое состояние и предлагать создать сессию.
 - Ошибки tmux MUST отображаться в статус-строке и логироваться.
+- Система MUST предотвращать запуск нескольких экземпляров одновременно (single instance enforcement).
+- Автоматическое создание сессии MUST быть защищено от гонок (race condition protection).
 
 ### 5.3 Безопасность
 
@@ -128,7 +130,8 @@
   "log_path": "~/.local/state/tmux-dashboard/log.jsonl",
   "color": "auto",
   "preview_lines": 10,
-  "dry_run": false
+  "dry_run": false,
+  "auto_rename_on_detach": true
 }
 ```
 
@@ -141,6 +144,7 @@
 | `TMUX_DASHBOARD_COLOR` | `auto|always|never` | `auto` |
 | `TMUX_DASHBOARD_PREVIEW_LINES` | Кол-во строк предпросмотра | `10` |
 | `TMUX_DASHBOARD_DRY_RUN` | Блокировка разрушительных действий | `false` |
+| `TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH` | Авто-синхронизация имен при выходе | `true` |
 
 ---
 
