@@ -68,6 +68,13 @@ The solution implements a robust file-based locking system with the following ch
 ~/.local/state/tmux-dashboard/pid     # Fallback PID file
 ```
 
+You can override these paths with environment variables:
+
+```
+TMUX_DASHBOARD_LOCK_FILE=/path/to/lock
+TMUX_DASHBOARD_PID_FILE=/path/to/pid
+```
+
 ### Locking Strategy
 
 #### Phase 1: File Locking (fcntl)

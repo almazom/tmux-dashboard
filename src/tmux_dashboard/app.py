@@ -132,6 +132,8 @@ Environment Variables:
   TMUX_DASHBOARD_SORT_MODE    Sort mode: activity/name/ai_first/windows_count (default: ai_first)
   TMUX_DASHBOARD_DRY_RUN      Set to 1/true/yes to enable dry-run mode (blocks delete)
   TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH  Set to 0/false to preserve manual session names (default: true)
+  TMUX_DASHBOARD_LOCK_FILE    Override lock file path (default: ~/.local/state/tmux-dashboard/lock)
+  TMUX_DASHBOARD_PID_FILE     Override PID file path (default: ~/.local/state/tmux-dashboard/pid)
 
 Keybindings in Dashboard:
   Up/Down      Navigate sessions
