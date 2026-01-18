@@ -49,36 +49,85 @@ class TmuxManager:
         """Detect project name from current working directory.
 
         Strategy:
-        1. If current directory has .git, use directory name
-        2. Walk up parents until .git found, use that directory name
-        3. If no .git found, use current directory name
-        4. If in home directory, use 'default'
+        1. Use the basename of the current working directory
+        2. If no basename (root), use 'default'
         """
         if self._cached_project_name:
             return self._cached_project_name
 
         cwd = Path.cwd()
-        home = Path.home()
 
-        # Check if we're in home directory (not in a project)
-        try:
-            if cwd == home or str(cwd).startswith(str(home) + "/") and len(cwd.relative_to(home).parts) <= 1:
-                self._cached_project_name = "default"
-                return self._cached_project_name
-        except ValueError:
-            pass
-
-        # Walk up to find .git folder
-        current = cwd
-        while current != home and current != current.parent:
-            if (current / ".git").exists():
-                self._cached_project_name = current.name
-                return self._cached_project_name
-            current = current.parent
-
-        # No .git found, use current directory name
-        self._cached_project_name = cwd.name
+        name = cwd.name or "default"
+        self._cached_project_name = name
         return self._cached_project_name
+
+    @staticmethod
+    def _project_name_from_path(path: str | None) -> Optional[str]:
+        if not path:
+            return None
+        try:
+            name = Path(path).name
+        except (TypeError, ValueError):
+            return None
+        return name or None
+
+    def _get_session_active_path(self, session_name: str) -> Optional[str]:
+        if self._libtmux:
+            try:
+                server = self._server()
+                if server:
+                    session = server.sessions.get(session_name=session_name)
+                    if session:
+                        window = getattr(session, "attached_window", None) or getattr(session, "active_window", None)
+                        if window is None:
+                            windows = list(session.windows)
+                            window = windows[0] if windows else None
+                        if window:
+                            pane = getattr(window, "attached_pane", None) or getattr(window, "active_pane", None)
+                            if pane is None:
+                                panes = list(window.panes)
+                                pane = panes[0] if panes else None
+                            if pane:
+                                path = getattr(pane, "pane_current_path", None)
+                                if path:
+                                    return str(path)
+            except Exception:
+                pass
+
+        try:
+            result = subprocess.run(
+                ["tmux", "list-panes", "-t", session_name, "-F", "#{window_active}::#{pane_active}::#{pane_current_path}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode != 0:
+                return None
+            fallback_path = None
+            for line in result.stdout.splitlines():
+                if not line.strip():
+                    continue
+                window_active, pane_active, path = (line.split("::", 2) + ["", "", ""])[:3]
+                if not path:
+                    continue
+                if window_active.strip() == "1" and pane_active.strip() == "1":
+                    return path
+                if fallback_path is None:
+                    fallback_path = path
+            return fallback_path
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return None
+
+    def _rename_window(self, session_name: str, new_name: str) -> bool:
+        try:
+            result = subprocess.run(
+                ["tmux", "rename-window", "-t", session_name, new_name],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0
+        except FileNotFoundError:
+            return False
 
     def generate_session_name(self, existing_sessions: list[SessionInfo]) -> str:
         """Generate a unique session name based on project folder.
@@ -132,6 +181,15 @@ class TmuxManager:
         # Sort based on the selected mode
         return self._sort_sessions(sessions_with_ai, sort_mode)
 
+    def most_recent_session(self) -> Optional[SessionInfo]:
+        """Return the most recently active tmux session if available."""
+        sessions_with_activity = self._list_sessions_activity_cli()
+        if sessions_with_activity:
+            return max(sessions_with_activity, key=lambda item: item[1])[0]
+
+        sessions = self.list_sessions(sort_mode=SortMode.ACTIVITY)
+        return sessions[0] if sessions else None
+
     def _sort_sessions(self, sessions: list[SessionInfo], mode: SortMode) -> list[SessionInfo]:
         """Sort sessions according to the specified mode."""
         if mode == SortMode.NAME:
@@ -167,6 +225,47 @@ class TmuxManager:
                 return []
 
         return self._list_sessions_cli()
+
+    def _list_sessions_activity_cli(self) -> list[tuple[SessionInfo, int]]:
+        try:
+            result = subprocess.run(
+                [
+                    "tmux",
+                    "list-sessions",
+                    "-F",
+                    "#{session_name}::#{session_attached}::#{session_windows}::#{session_activity}::#{session_last_attached}",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except FileNotFoundError:
+            return []
+        if result.returncode != 0:
+            if "no server running" in result.stderr.lower():
+                return []
+            return []
+
+        sessions: list[tuple[SessionInfo, int]] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            parts = (line.split("::", 4) + ["", "", "", "", ""])[:5]
+            name, attached, windows, activity, last_attached = parts
+            activity_ts = int(activity) if activity.isdigit() else 0
+            last_attached_ts = int(last_attached) if last_attached.isdigit() else 0
+            score = max(activity_ts, last_attached_ts)
+            sessions.append(
+                (
+                    SessionInfo(
+                        name=name,
+                        attached=self._normalize_attached(attached),
+                        windows=int(windows) if windows.isdigit() else 0,
+                    ),
+                    score,
+                )
+            )
+
+        return sessions
 
     def _is_ai_session(self, session_name: str) -> bool:
         """Check if a session contains an AI agent by checking pane commands."""
@@ -239,6 +338,49 @@ class TmuxManager:
         if result.returncode != 0:
             raise TmuxError(result.stderr.strip() or "tmux new-session failed")
 
+    def create_session_with_cd(self, name: str, directory: Optional[str] = None) -> None:
+        """Create a new tmux session and automatically cd to the specified directory.
+
+        Args:
+            name: The session name
+            directory: Directory to cd into (defaults to current working directory project)
+
+        If directory is None, it will use the detected project directory.
+        """
+        # Determine the directory to cd into
+        if directory is None:
+            target_dir = str(Path.cwd())
+        else:
+            target_dir = directory
+
+        if self._libtmux:
+            server = self._server()
+            if server is None:
+                raise TmuxError("tmux server unavailable")
+            # Create session with cd command
+            server.new_session(
+                session_name=name,
+                detach=True,
+                start_directory=target_dir,
+            )
+            self._rename_window(name, name)
+            return
+
+        # Use tmux CLI with cd command
+        cd_command = f"cd {target_dir} && clear"
+        result = subprocess.run([
+            "tmux", "new-session", "-d", "-s", name, "-c", target_dir
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            raise TmuxError(result.stderr.strip() or "tmux new-session failed")
+
+        self._rename_window(name, name)
+        # Send the clear command to the first window
+        subprocess.run([
+            "tmux", "send-keys", "-t", f"{name}:0", "clear", "Enter"
+        ], capture_output=True)
+
     def attach_command(self, name: str) -> list[str]:
         # Check if already inside tmux
         tmux_env = os.environ.get("TMUX")
@@ -249,18 +391,20 @@ class TmuxManager:
         return ["tmux", "attach-session", "-t", name]
 
     def rename_session_to_project(self, session_name: str) -> Optional[str]:
-        """Rename a session to match the current working directory's basename.
+        """Rename a session to match the session's active pane directory basename.
 
         Returns:
             The new name if renamed, None if failed or no change needed.
         """
         try:
-            # Get current working directory basename
-            cwd = Path.cwd()
-            new_name = cwd.name
+            session_path = self._get_session_active_path(session_name)
+            new_name = self._project_name_from_path(session_path)
+            if not new_name:
+                return None
 
             # Don't rename if already has this name
             if session_name == new_name:
+                self._rename_window(session_name, new_name)
                 return None
 
             # Use libtmux if available
@@ -270,6 +414,7 @@ class TmuxManager:
                     session = server.sessions.get(session_name=session_name)
                     if session:
                         session.rename_session(new_name)
+                        self._rename_window(new_name, new_name)
                         return new_name
 
             # CLI fallback
@@ -279,6 +424,7 @@ class TmuxManager:
                 text=True
             )
             if result.returncode == 0:
+                self._rename_window(new_name, new_name)
                 return new_name
 
         except Exception:
@@ -304,6 +450,7 @@ class TmuxManager:
             if server is None:
                 raise TmuxError("tmux server unavailable")
             server.cmd("rename-session", "-t", old_name, new_name)
+            self._rename_window(new_name, new_name)
             return
 
         result = subprocess.run(
@@ -313,6 +460,7 @@ class TmuxManager:
         )
         if result.returncode != 0:
             raise TmuxError(result.stderr.strip() or "tmux rename-session failed")
+        self._rename_window(new_name, new_name)
 
     def get_session_details(self, name: str) -> Optional[SessionDetails]:
         if not self._libtmux:
@@ -338,6 +486,31 @@ class TmuxManager:
                 )
             windows.append(WindowInfo(name=window.window_name, panes=panes))
         return SessionDetails(windows=windows)
+
+    def capture_pane_text(self, session_name: str, pane_id: str = ".") -> Optional[list[str]]:
+        """Capture the text content of a pane for live preview.
+
+        Args:
+            session_name: The tmux session name
+            pane_id: The pane index or id (defaults to current pane)
+
+        Returns:
+            List of text lines from the pane, or None if failed
+        """
+        try:
+            result = subprocess.run(
+                ["tmux", "capture-pane", "-t", f"{session_name}:{pane_id}", "-p"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                lines = result.stdout.splitlines()
+                # Take last N lines for preview
+                return lines[-15:] if len(lines) > 15 else lines
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return None
 
     @staticmethod
     def _normalize_attached(value: object) -> bool:
