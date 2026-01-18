@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -17,16 +18,32 @@ if ZoneInfo is not None:
 else:
     MSK_TZ = timezone(timedelta(hours=3))
 
+_WARNED_WRITE_FAILURE = False
+
+
+def _warn_write_failure(path: Path, exc: OSError) -> None:
+    global _WARNED_WRITE_FAILURE
+    if _WARNED_WRITE_FAILURE:
+        return
+    _WARNED_WRITE_FAILURE = True
+    try:
+        print(f"tmux-dashboard: failed to write log to {path}: {exc}", file=sys.stderr)
+    except Exception:
+        pass
+
 
 @dataclass
 class Logger:
     log_path: Path
 
     def _write(self, record: dict[str, Any]) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(record, ensure_ascii=True)
-        with self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(record, ensure_ascii=True)
+            with self.log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError as exc:
+            _warn_write_failure(self.log_path, exc)
 
     def log(self, level: str, event: str, message: str, session_name: str | None = None) -> None:
         ts = datetime.now(tz=MSK_TZ).isoformat()
