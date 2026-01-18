@@ -52,3 +52,16 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+
+# Logs (keep *.log in temp files, but add jsonl specific)
+*.log.jsonl
+
+# Claude temp files
+.claude/projects/
