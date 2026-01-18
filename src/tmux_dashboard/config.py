@@ -17,6 +17,7 @@ DEFAULT_PREVIEW_LINES = 10
 DEFAULT_DRY_RUN = False
 DEFAULT_SORT_MODE = SortMode.AI_FIRST
 DEFAULT_AUTO_CREATE = True
+DEFAULT_AUTO_RENAME_ON_DETACH = True
 
 
 @dataclass
@@ -28,6 +29,7 @@ class Config:
     dry_run: bool
     sort_mode: SortMode = field(default_factory=lambda: DEFAULT_SORT_MODE)
     auto_create: bool = field(default_factory=lambda: DEFAULT_AUTO_CREATE)
+    auto_rename_on_detach: bool = field(default_factory=lambda: DEFAULT_AUTO_RENAME_ON_DETACH)
 
     def save_sort_mode(self, mode: SortMode) -> None:
         """Save sort mode to config file."""
@@ -102,6 +104,11 @@ def load_config(path: str | None = None) -> Config:
     else:
         auto_create = bool(data.get("auto_create", DEFAULT_AUTO_CREATE))
 
+    if "TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH" in os.environ:
+        auto_rename_on_detach = _parse_bool(os.environ["TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH"])
+    else:
+        auto_rename_on_detach = bool(data.get("auto_rename_on_detach", DEFAULT_AUTO_RENAME_ON_DETACH))
+
     return Config(
         config_path=config_path,
         log_path=log_path,
@@ -110,4 +117,5 @@ def load_config(path: str | None = None) -> Config:
         dry_run=dry_run,
         sort_mode=sort_mode,
         auto_create=auto_create,
+        auto_rename_on_detach=auto_rename_on_detach,
     )
