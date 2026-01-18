@@ -484,8 +484,8 @@ def _prompt_input_popup(stdscr: "curses._CursesWindow", title: str, default: str
 
 FUNNY_NAMES = [
     "chaos-monkey", "coffee-otter", "hamster-wheel", "noodle-inc",
-    "wizard-mode", "sneaky-panda", " turbo-snail", "quantum-unicorn",
-    "pixel-quest", "glitch-wizard", " banana-hammock", "retro-burrito",
+    "wizard-mode", "sneaky-panda", "turbo-snail", "quantum-unicorn",
+    "pixel-quest", "glitch-wizard", "banana-hammock", "retro-burrito",
     "neon-ninja", "space-cactus", "lucky-lobster", "cosmic-donut",
     "zombie-penguin", "jellyfish-jazz", "electric-lemur", "spooky-ghost",
     "grumpy-cat", "fancy-pants", "bubbles-mcgee", "twitchy-turtle",
