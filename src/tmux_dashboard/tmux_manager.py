@@ -7,10 +7,8 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 from .models import PaneInfo, SessionInfo, SortMode, WindowInfo
-
 
 # Keywords to detect AI agent sessions
 AI_KEYWORDS = [
@@ -43,7 +41,7 @@ class SessionDetails:
 class TmuxManager:
     def __init__(self) -> None:
         self._libtmux = libtmux
-        self._cached_project_name: Optional[str] = None
+        self._cached_project_name: str | None = None
 
     def detect_project_name(self) -> str:
         """Detect project name from current working directory.
@@ -62,7 +60,7 @@ class TmuxManager:
         return self._cached_project_name
 
     @staticmethod
-    def _project_name_from_path(path: str | None) -> Optional[str]:
+    def _project_name_from_path(path: str | None) -> str | None:
         if not path:
             return None
         try:
@@ -71,7 +69,7 @@ class TmuxManager:
             return None
         return name or None
 
-    def _get_session_active_path(self, session_name: str) -> Optional[str]:
+    def _get_session_active_path(self, session_name: str) -> str | None:
         if self._libtmux:
             try:
                 server = self._server()
@@ -181,7 +179,7 @@ class TmuxManager:
         # Sort based on the selected mode
         return self._sort_sessions(sessions_with_ai, sort_mode)
 
-    def most_recent_session(self) -> Optional[SessionInfo]:
+    def most_recent_session(self) -> SessionInfo | None:
         """Return the most recently active tmux session if available."""
         sessions_with_activity = self._list_sessions_activity_cli()
         if sessions_with_activity:
@@ -338,7 +336,7 @@ class TmuxManager:
         if result.returncode != 0:
             raise TmuxError(result.stderr.strip() or "tmux new-session failed")
 
-    def create_session_with_cd(self, name: str, directory: Optional[str] = None) -> None:
+    def create_session_with_cd(self, name: str, directory: str | None = None) -> None:
         """Create a new tmux session and automatically cd to the specified directory.
 
         Args:
@@ -366,8 +364,7 @@ class TmuxManager:
             self._rename_window(name, name)
             return
 
-        # Use tmux CLI with cd command
-        cd_command = f"cd {target_dir} && clear"
+        # Use tmux CLI with -c to set the start directory
         result = subprocess.run([
             "tmux", "new-session", "-d", "-s", name, "-c", target_dir
         ], capture_output=True, text=True)
@@ -390,7 +387,7 @@ class TmuxManager:
         # Not inside tmux - use attach-session
         return ["tmux", "attach-session", "-t", name]
 
-    def rename_session_to_project(self, session_name: str) -> Optional[str]:
+    def rename_session_to_project(self, session_name: str) -> str | None:
         """Rename a session to match the session's active pane directory basename.
 
         Returns:
@@ -462,7 +459,7 @@ class TmuxManager:
             raise TmuxError(result.stderr.strip() or "tmux rename-session failed")
         self._rename_window(new_name, new_name)
 
-    def get_session_details(self, name: str) -> Optional[SessionDetails]:
+    def get_session_details(self, name: str) -> SessionDetails | None:
         if not self._libtmux:
             return None
 
@@ -487,7 +484,7 @@ class TmuxManager:
             windows.append(WindowInfo(name=window.window_name, panes=panes))
         return SessionDetails(windows=windows)
 
-    def capture_pane_text(self, session_name: str, pane_id: str = ".") -> Optional[list[str]]:
+    def capture_pane_text(self, session_name: str, pane_id: str = ".") -> list[str] | None:
         """Capture the text content of a pane for live preview.
 
         Args:
