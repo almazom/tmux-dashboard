@@ -8,6 +8,7 @@ import sys
 from dataclasses import dataclass
 
 from .config import load_config
+from .headless import HeadlessRegistry
 from .input_handler import run_dashboard
 from .instance_lock import LockAcquisitionError, ensure_single_instance
 from .logger import Logger
@@ -43,6 +44,7 @@ def run() -> None:
     config = load_config()
     logger = Logger(config.log_path)
     tmux = TmuxManager()
+    headless_registry = HeadlessRegistry(config.headless_state_dir, config.headless_output_dir)
 
     try:
         lock = ensure_single_instance(exit_on_conflict=False, verbose=False)
@@ -106,7 +108,7 @@ def run() -> None:
                 # Fall through to normal dashboard
 
         while True:
-            action = run_dashboard(tmux, config, logger, pending_status)
+            action = run_dashboard(tmux, config, logger, headless_registry, pending_status)
             pending_status = None
 
             if action is None or action.kind == "refresh":
