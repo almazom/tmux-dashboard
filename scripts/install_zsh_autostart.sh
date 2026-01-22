@@ -2,7 +2,8 @@
 set -euo pipefail
 
 TARGET_FILE="${1:-$HOME/.zshrc}"
-DASHBOARD_CMD="${TMUX_DASHBOARD_CMD:-python3 -m tmux_dashboard}"
+SCRIPT_DIR="${0:A:h}"
+PROMPT_SCRIPT="$SCRIPT_DIR/ssh_login_prompt.sh"
 MARKER="# tmux-dashboard autostart"
 
 if [ ! -f "$TARGET_FILE" ]; then
@@ -17,9 +18,11 @@ fi
 cat >> "$TARGET_FILE" << EOF_SNIPPET
 
 $MARKER
-if [[ \$- == *i* ]] && [[ -z "\${TMUX}" ]]; then
-  exec $DASHBOARD_CMD
+# Source the SSH login prompt script
+if [[ -f "$PROMPT_SCRIPT" ]]; then
+  source "$PROMPT_SCRIPT"
 fi
 EOF_SNIPPET
 
 echo "Autostart snippet added to $TARGET_FILE"
+echo "The prompt will ask users to choose Tmux Manager or Raw Shell on SSH login."
