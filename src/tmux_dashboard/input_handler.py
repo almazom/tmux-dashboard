@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import curses
+import json
 import random
+import re
 import subprocess
+import textwrap
 import time
+from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 from .config import Config
+from .headless import (
+    HeadlessRegistry,
+    HeadlessSession,
+    build_headless_session,
+    build_headless_shell_command,
+)
 from .logger import Logger
-from .models import SortMode
+from .models import SessionInfo, SortMode
 from .tmux_manager import TmuxError, TmuxManager
 from .ui import DashboardUI, UiState, UiStatus
 
@@ -25,6 +38,7 @@ def run_dashboard(
     tmux: TmuxManager,
     config: Config,
     logger: Logger,
+    headless_registry: HeadlessRegistry,
     pending_status: object | None = None,
 ) -> Action | None:
     def _main(stdscr: curses._CursesWindow) -> Action | None:
@@ -39,7 +53,7 @@ def run_dashboard(
 
         # Initialize sort mode from config
         sort_mode = config.sort_mode
-        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+        sessions, headless_map, list_status = _refresh_sessions(tmux, logger, sort_mode, headless_registry)
         if list_status:
             status = list_status
         selected_index = 0
@@ -50,6 +64,7 @@ def run_dashboard(
         last_preview_at = 0.0
         cached_preview = None
         cached_pane_capture = None
+        cached_preview_title = "Live Preview:"
         preview_interval = 0.5
 
         while True:
@@ -58,39 +73,59 @@ def run_dashboard(
             stdscr.timeout(100)
 
             filtered = _filter_sessions(sessions, filter_text)
-            selected_index = _clamp_index(selected_index, len(filtered))
+            ordered, headless_start_index, interactive_sessions = _group_headless_sessions(filtered)
+            selected_index = _clamp_index(selected_index, len(ordered))
 
             preview = None
             pane_capture = None
-            if filtered and config.preview_lines > 0:
-                current_session = filtered[selected_index].name
+            preview_title = cached_preview_title
+            if ordered and config.preview_lines > 0:
+                selected_session = ordered[selected_index]
+                current_session = selected_session.name
                 now = time.monotonic()
                 should_refresh = (
                     current_session != last_preview_session
                     or (now - last_preview_at) >= preview_interval
                 )
                 if should_refresh:
-                    try:
-                        preview = tmux.get_session_details(current_session)
-                        # Also capture live pane content
-                        pane_capture = tmux.capture_pane_text(current_session)
-                        cached_preview = preview
-                        cached_pane_capture = pane_capture
-                        last_preview_session = current_session
-                        last_preview_at = now
-                    except TmuxError as exc:
-                        status = UiStatus(str(exc), level="error")
-                        logger.error("preview", str(exc), current_session)
+                    if selected_session.is_headless:
+                        headless_session = headless_map.get(current_session)
+                        pane_capture = _read_headless_output(
+                            headless_session.output_path if headless_session else None,
+                            config.headless_max_events,
+                        )
+                        preview_title = "Headless Output:"
                         cached_preview = None
-                        cached_pane_capture = None
+                        cached_pane_capture = pane_capture
+                        cached_preview_title = preview_title
                         last_preview_session = current_session
                         last_preview_at = now
+                    else:
+                        try:
+                            preview = tmux.get_session_details(current_session)
+                            # Also capture live pane content
+                            pane_capture = tmux.capture_pane_text(current_session)
+                            preview_title = "Live Preview:"
+                            cached_preview = preview
+                            cached_pane_capture = pane_capture
+                            cached_preview_title = preview_title
+                            last_preview_session = current_session
+                            last_preview_at = now
+                        except TmuxError as exc:
+                            status = UiStatus(str(exc), level="error")
+                            logger.error("preview", str(exc), current_session)
+                            cached_preview = None
+                            cached_pane_capture = None
+                            cached_preview_title = "Live Preview:"
+                            last_preview_session = current_session
+                            last_preview_at = now
                 else:
                     preview = cached_preview
                     pane_capture = cached_pane_capture
+                    preview_title = cached_preview_title
 
             state = UiState(
-                sessions=filtered,
+                sessions=ordered,
                 selected_index=selected_index,
                 filter_text=filter_text,
                 in_search=in_search,
@@ -99,6 +134,8 @@ def run_dashboard(
                 preview=preview.windows if preview else None,
                 pane_capture=pane_capture,
                 sort_mode=sort_mode,
+                headless_start_index=headless_start_index,
+                preview_title=preview_title,
             )
             ui.render(state, config.preview_lines)
 
@@ -112,8 +149,25 @@ def run_dashboard(
                 if key in (ord("q"), 3):
                     return Action(kind="exit")
                 if key in (10, 13):
-                    if filtered:
-                        return Action(kind="attach", session_name=filtered[selected_index].name)
+                    if ordered:
+                        target = ordered[selected_index]
+                        if target.is_headless:
+                            _view_headless_session(
+                                stdscr,
+                                target.name,
+                                headless_registry,
+                                config,
+                                logger,
+                            )
+                            sessions, headless_map, list_status = _refresh_sessions(
+                                tmux,
+                                logger,
+                                sort_mode,
+                                headless_registry,
+                            )
+                            status = list_status or UiStatus(f"Returned from {target.name}", level="info")
+                            continue
+                        return Action(kind="attach", session_name=target.name)
                     status = UiStatus("No sessions match search", level="warning")
                     continue
                 if key in (curses.KEY_BACKSPACE, 127, 8):
@@ -135,15 +189,16 @@ def run_dashboard(
             # Quick numbered attach (keys 1-9)
             if 49 <= key <= 57:  # Keys 1-9
                 num = key - 48  # Convert to 1-9
-                if num <= len(filtered):
-                    session_name = filtered[num - 1].name
-                    sessions, status, selected_index, _ = _attach_and_refresh(
+                if num <= len(interactive_sessions):
+                    session_name = interactive_sessions[num - 1].name
+                    sessions, headless_map, status, selected_index, _ = _attach_and_refresh(
                         stdscr,
                         tmux,
                         session_name,
                         logger,
                         sort_mode,
                         filter_text,
+                        headless_registry,
                         auto_rename_on_detach=config.auto_rename_on_detach,
                     )
                     continue
@@ -155,19 +210,37 @@ def run_dashboard(
                 selected_index = max(0, selected_index - 1)
                 continue
             if key == curses.KEY_DOWN:
-                selected_index = min(max(0, len(filtered) - 1), selected_index + 1)
+                selected_index = min(max(0, len(ordered) - 1), selected_index + 1)
                 continue
             if key in (10, 13):
-                if filtered:
-                    # Handle attach within the curses context
-                    session_name = filtered[selected_index].name
-                    sessions, status, selected_index, _ = _attach_and_refresh(
+                if ordered:
+                    # Handle attach/view within the curses context
+                    selected_session = ordered[selected_index]
+                    if selected_session.is_headless:
+                        _view_headless_session(
+                            stdscr,
+                            selected_session.name,
+                            headless_registry,
+                            config,
+                            logger,
+                        )
+                        sessions, headless_map, list_status = _refresh_sessions(
+                            tmux,
+                            logger,
+                            sort_mode,
+                            headless_registry,
+                        )
+                        status = list_status or UiStatus(f"Returned from {selected_session.name}", level="info")
+                        continue
+
+                    sessions, headless_map, status, selected_index, _ = _attach_and_refresh(
                         stdscr,
                         tmux,
-                        session_name,
+                        selected_session.name,
                         logger,
                         sort_mode,
                         filter_text,
+                        headless_registry,
                         auto_rename_on_detach=config.auto_rename_on_detach,
                     )
                     continue
@@ -191,11 +264,81 @@ def run_dashboard(
                         name = f"{base}-{counter}"
                         counter += 1
                 return Action(kind="create", session_name=name)
+            if key == ord("H"):
+                request = _prompt_headless_request(stdscr, config)
+                if request is None:
+                    status = UiStatus("Headless create canceled", level="warning")
+                    continue
+
+                workdir_raw, agent_raw, instruction = request
+                workdir_path = Path(workdir_raw).expanduser()
+                if not workdir_path.exists() or not workdir_path.is_dir():
+                    status = UiStatus(f"Invalid directory: {workdir_raw}", level="error")
+                    continue
+
+                agent = agent_raw.strip().lower()
+                if not agent:
+                    agent = config.headless_default_agent
+                if agent not in config.headless_agents:
+                    status = UiStatus(f"Unknown headless agent: {agent}", level="error")
+                    continue
+
+                existing_names = {s.name for s in sessions}
+                session_name = _build_headless_session_name(
+                    agent,
+                    workdir_path.name or "headless",
+                    existing_names,
+                )
+                output_path = headless_registry.output_path(session_name)
+                command_template = config.headless_agents[agent]
+                try:
+                    command_list = build_headless_shell_command(
+                        command_template,
+                        instruction,
+                        str(output_path),
+                        str(workdir_path),
+                        agent,
+                    )
+                except (KeyError, ValueError) as exc:
+                    status = UiStatus(f"Headless command template error: {exc}", level="error")
+                    continue
+                command_preview = command_list[-1] if command_list else None
+
+                try:
+                    tmux.create_session_with_command(session_name, command_list, directory=str(workdir_path))
+                    headless_session = build_headless_session(
+                        session_name=session_name,
+                        agent=agent,
+                        instruction=instruction,
+                        workdir=str(workdir_path),
+                        output_path=str(output_path),
+                        command=command_preview,
+                    )
+                    headless_registry.record(headless_session)
+                    logger.info("headless_create", f"headless session created: {agent}", session_name)
+                    _view_headless_session(
+                        stdscr,
+                        session_name,
+                        headless_registry,
+                        config,
+                        logger,
+                    )
+                    sessions, headless_map, list_status = _refresh_sessions(
+                        tmux,
+                        logger,
+                        sort_mode,
+                        headless_registry,
+                    )
+                    status = list_status or UiStatus(f"Headless session created: {session_name}", level="info")
+                except TmuxError as exc:
+                    logger.error("headless_create", str(exc), session_name)
+                    status = UiStatus(str(exc), level="error")
+                continue
             if key == ord("d"):
-                if not filtered:
+                if not ordered:
                     status = UiStatus("No sessions to delete", level="warning")
                     continue
-                target = filtered[selected_index]
+                target = ordered[selected_index]
                 if config.dry_run:
                     status = UiStatus("Dry-run enabled. Delete blocked.", level="warning")
                     logger.warn("delete", "dry-run blocked delete", target.name)
@@ -213,8 +356,15 @@ def run_dashboard(
                 if confirm:
                     try:
                         tmux.kill_session(target.name)
+                        if target.is_headless:
+                            headless_registry.forget(target.name)
                         logger.info("delete", "session deleted", target.name)
-                        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                        sessions, headless_map, list_status = _refresh_sessions(
+                            tmux,
+                            logger,
+                            sort_mode,
+                            headless_registry,
+                        )
                         status = list_status or UiStatus("Session deleted", level="info")
                     except TmuxError as exc:
                         logger.error("delete", str(exc), target.name)
@@ -223,16 +373,24 @@ def run_dashboard(
                     status = UiStatus("Delete canceled", level="warning")
                 continue
             if key == ord("R"):  # Shift+r for rename
-                if not filtered:
+                if not ordered:
                     status = UiStatus("No sessions to rename", level="warning")
                     continue
-                target = filtered[selected_index]
+                target = ordered[selected_index]
+                if target.is_headless:
+                    status = UiStatus("Headless sessions cannot be renamed yet", level="warning")
+                    continue
                 new_name = _prompt_input_popup(stdscr, "Rename session")
                 if new_name and new_name != target.name:
                     try:
                         tmux.rename_session(target.name, new_name)
                         logger.info("rename", f"renamed {target.name} to {new_name}")
-                        sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                        sessions, headless_map, list_status = _refresh_sessions(
+                            tmux,
+                            logger,
+                            sort_mode,
+                            headless_registry,
+                        )
                         status = list_status or UiStatus("Session renamed", level="info")
                     except TmuxError as exc:
                         logger.error("rename", str(exc), target.name)
@@ -246,7 +404,12 @@ def run_dashboard(
                 return Action(kind="exit")
 
             if key == ord("r"):
-                sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                sessions, headless_map, list_status = _refresh_sessions(
+                    tmux,
+                    logger,
+                    sort_mode,
+                    headless_registry,
+                )
                 status = list_status or UiStatus("Session list refreshed", level="info")
                 continue
 
@@ -257,7 +420,12 @@ def run_dashboard(
                 # Save to config
                 config.save_sort_mode(new_mode)
                 # Re-sort sessions
-                sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+                sessions, headless_map, list_status = _refresh_sessions(
+                    tmux,
+                    logger,
+                    sort_mode,
+                    headless_registry,
+                )
                 status = list_status or UiStatus(f"Sort mode: {new_mode.label} ({new_mode.description})", level="info")
                 selected_index = 0  # Reset to top after re-sort
                 continue
@@ -325,8 +493,9 @@ def _attach_and_refresh(
     logger: Logger,
     sort_mode: SortMode,
     filter_text: str,
+    headless_registry: HeadlessRegistry,
     auto_rename_on_detach: bool = True,
-) -> tuple[list, UiStatus | None, int, str]:
+) -> tuple[list, dict[str, HeadlessSession], UiStatus | None, int, str]:
     actual_session_name = _do_attach(
         stdscr,
         tmux,
@@ -337,20 +506,21 @@ def _attach_and_refresh(
     if not actual_session_name:
         actual_session_name = session_name
 
-    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+    sessions, headless_map, list_status = _refresh_sessions(tmux, logger, sort_mode, headless_registry)
     status = list_status or UiStatus(f"Returned from {actual_session_name}", level="info")
     filtered = _filter_sessions(sessions, filter_text)
-    if filtered:
-        selected_index = _find_session_index(filtered, actual_session_name)
-        if selected_index == 0 and filtered[0].name != actual_session_name:
-            session_names = [s.name for s in filtered]
+    ordered, _, _ = _group_headless_sessions(filtered)
+    if ordered:
+        selected_index = _find_session_index(ordered, actual_session_name)
+        if selected_index == 0 and ordered[0].name != actual_session_name:
+            session_names = [s.name for s in ordered]
             logger.warn(
                 "cursor_restore",
                 f"Session '{actual_session_name}' not found in filtered list: {session_names}",
             )
     else:
         selected_index = 0
-    return sessions, status, selected_index, actual_session_name
+    return sessions, headless_map, status, selected_index, actual_session_name
 
 
 def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode = SortMode.DEFAULT) -> tuple[list, UiStatus | None]:
@@ -359,6 +529,53 @@ def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode =
     except TmuxError as exc:
         logger.error("session_list", str(exc))
         return [], UiStatus(str(exc), level="error")
+
+
+def _refresh_sessions(
+    tmux: TmuxManager,
+    logger: Logger,
+    sort_mode: SortMode,
+    headless_registry: HeadlessRegistry,
+) -> tuple[list[SessionInfo], dict[str, HeadlessSession], UiStatus | None]:
+    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+    headless_map = headless_registry.load_all()
+    sessions = _apply_headless_metadata(sessions, headless_map)
+    return sessions, headless_map, list_status
+
+
+def _apply_headless_metadata(
+    sessions: list[SessionInfo],
+    headless_map: dict[str, HeadlessSession],
+) -> list[SessionInfo]:
+    if not headless_map:
+        return sessions
+    enriched: list[SessionInfo] = []
+    for session in sessions:
+        headless = headless_map.get(session.name)
+        if headless:
+            enriched.append(
+                SessionInfo(
+                    name=session.name,
+                    attached=session.attached,
+                    windows=session.windows,
+                    is_ai_session=session.is_ai_session or True,
+                    is_headless=True,
+                    headless_agent=getattr(headless, "agent", None),
+                )
+            )
+        else:
+            enriched.append(session)
+    return enriched
+
+
+def _group_headless_sessions(
+    sessions: list[SessionInfo],
+) -> tuple[list[SessionInfo], int | None, list[SessionInfo]]:
+    interactive = [session for session in sessions if not session.is_headless]
+    headless = [session for session in sessions if session.is_headless]
+    ordered = interactive + headless
+    headless_start_index = len(interactive) if headless else None
+    return ordered, headless_start_index, interactive
 
 
 def _filter_sessions(sessions: list, filter_text: str) -> list:
@@ -382,16 +599,21 @@ def _find_session_index(sessions: list, session_name: str) -> int:
     return 0  # Default to first session if not found
 
 
-def _prompt_input_popup(stdscr: curses._CursesWindow, title: str, default: str = "") -> str | None:
+def _prompt_input_popup(
+    stdscr: curses._CursesWindow,
+    title: str,
+    default: str = "",
+    prompt: str = "Enter session name:",
+    help_text: str = "Enter=confirm  Esc=cancel",
+    max_len: int = 50,
+    allow_empty: bool = False,
+) -> str | None:
     height, width = stdscr.getmaxyx()
     try:
         curses.curs_set(1)
     except curses.error:
         pass
     stdscr.nodelay(False)
-
-    prompt = "Enter session name:"
-    help_text = "Enter=confirm  Esc=cancel"
 
     # Initialize buffer with default value
     buffer: list[str] = list(default)
@@ -439,7 +661,7 @@ def _prompt_input_popup(stdscr: curses._CursesWindow, title: str, default: str =
                 buffer.pop()
             continue
         if 32 <= key <= 126:
-            if len(buffer) < 50:
+            if len(buffer) < max_len:
                 buffer.append(chr(key))
 
     try:
@@ -447,7 +669,276 @@ def _prompt_input_popup(stdscr: curses._CursesWindow, title: str, default: str =
     except curses.error:
         pass
     value = "".join(buffer).strip()
-    return value or None
+    if value:
+        return value
+    return "" if allow_empty else None
+
+
+def _prompt_headless_request(stdscr: curses._CursesWindow, config: Config) -> tuple[str, str, str] | None:
+    workdir_default = str(Path.cwd())
+    workdir = _prompt_input_popup(
+        stdscr,
+        "Headless mode",
+        default=workdir_default,
+        prompt="Workdir:",
+        max_len=200,
+    )
+    if workdir is None:
+        return None
+
+    agent = _prompt_input_popup(
+        stdscr,
+        "Headless mode",
+        default=config.headless_default_agent,
+        prompt="Agent (codex/cladcode):",
+        max_len=32,
+    )
+    if agent is None:
+        return None
+
+    instruction = _prompt_input_popup(
+        stdscr,
+        "Headless mode",
+        default="",
+        prompt="Instruction (optional):",
+        max_len=240,
+        allow_empty=True,
+    )
+    if instruction is None:
+        return None
+
+    return workdir, agent, instruction
+
+
+def _build_headless_session_name(agent: str, project: str, existing_names: set[str]) -> str:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_agent = _sanitize_session_component(agent)
+    safe_project = _sanitize_session_component(project)
+    base = f"headless-{safe_agent}-{safe_project}-{timestamp}"
+    return _unique_session_name(base, existing_names)
+
+
+def _sanitize_session_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip().lower())
+    return cleaned.strip("-") or "headless"
+
+
+def _unique_session_name(base: str, existing_names: set[str]) -> str:
+    if base not in existing_names:
+        return base
+    counter = 2
+    candidate = f"{base}-{counter}"
+    while candidate in existing_names:
+        counter += 1
+        candidate = f"{base}-{counter}"
+    return candidate
+
+
+def _view_headless_session(
+    stdscr: curses._CursesWindow,
+    session_name: str,
+    headless_registry: HeadlessRegistry,
+    config: Config,
+    logger: Logger,
+) -> None:
+    session = headless_registry.get(session_name)
+    if session is None:
+        _show_message(stdscr, f"Headless metadata not found for {session_name}")
+        return
+
+    output_lines: list[str] = []
+    last_refresh = 0.0
+    refresh_interval = max(1, config.headless_refresh_seconds)
+
+    while True:
+        now = time.monotonic()
+        if (now - last_refresh) >= refresh_interval:
+            output_lines = _read_headless_output(session.output_path, config.headless_max_events)
+            last_refresh = now
+
+        status_line = f"Output: {Path(session.output_path).name}  Refresh: {refresh_interval}s"
+        _render_headless_view(stdscr, session, output_lines, status_line)
+
+        stdscr.timeout(200)
+        key = stdscr.getch()
+        if key in (ord("q"), 27):
+            return
+        if key == ord("r"):
+            last_refresh = 0.0
+            logger.info("headless_view", "manual refresh", session_name)
+
+
+def _render_headless_view(
+    stdscr: curses._CursesWindow,
+    session: HeadlessSession,
+    output_lines: list[str],
+    status_line: str,
+) -> None:
+    stdscr.erase()
+    height, width = stdscr.getmaxyx()
+    left = 2
+    max_width = max(1, width - left - 1)
+
+    row = 1
+    title = f"Headless Session: {session.session_name} [{session.agent}]"
+    _safe_addstr(stdscr, row, left, title[:max_width])
+    row += 2
+
+    _safe_addstr(stdscr, row, left, f"Path: {session.workdir}"[:max_width])
+    row += 1
+
+    _safe_addstr(stdscr, row, left, "Instruction:"[:max_width])
+    row += 1
+
+    instruction = session.instruction or "(empty)"
+    for line in _wrap_lines(instruction, max_width):
+        if row >= height - 4:
+            break
+        _safe_addstr(stdscr, row, left, line[:max_width])
+        row += 1
+
+    if row < height - 4:
+        row += 1
+
+    _safe_addstr(stdscr, row, left, "Output:"[:max_width])
+    row += 1
+
+    available = max(0, height - row - 2)
+    wrapped_output: list[str] = []
+    for line in output_lines:
+        wrapped_output.extend(_wrap_lines(line, max_width))
+    if not wrapped_output:
+        wrapped_output = ["(waiting for output)"]
+    for line in wrapped_output[-available:]:
+        _safe_addstr(stdscr, row, left, line[:max_width])
+        row += 1
+
+    footer = "q/Esc back  r refresh"
+    _safe_addstr(stdscr, height - 2, left, footer[:max_width])
+    _safe_addstr(stdscr, height - 1, left, status_line[:max_width])
+    stdscr.refresh()
+
+
+def _read_headless_output(output_path: str | None, max_events: int) -> list[str]:
+    if not output_path:
+        return ["(headless output unavailable)"]
+    path = Path(output_path)
+    if not path.exists():
+        return ["(waiting for output)"]
+
+    events: deque[list[str]] = deque(maxlen=max_events)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError:
+                    events.append([line])
+                    continue
+                events.append(_summarize_headless_event(payload))
+    except OSError:
+        return ["(failed to read output)"]
+
+    if not events:
+        return ["(waiting for output)"]
+
+    output_lines: list[str] = []
+    for event_lines in events:
+        output_lines.extend(event_lines)
+    return output_lines
+
+
+def _summarize_headless_event(payload: Any) -> list[str]:
+    if isinstance(payload, dict):
+        event_type = _stringify_event_value(payload.get("type") or payload.get("event") or payload.get("kind"))
+        message = _extract_event_message(payload)
+        if message:
+            lines = message.splitlines() or [message]
+        else:
+            try:
+                lines = [json.dumps(payload, ensure_ascii=True)]
+            except (TypeError, ValueError):
+                lines = [str(payload)]
+        if event_type:
+            lines[0] = f"{event_type}: {lines[0]}"
+        return lines
+    return [str(payload)]
+
+
+def _extract_event_message(payload: dict[str, Any]) -> str | None:
+    for key in ("message", "content", "text", "delta", "output", "data"):
+        candidate = _stringify_event_value(payload.get(key))
+        if candidate:
+            return candidate
+
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            for path in (("delta", "content"), ("message", "content"), ("message",), ("delta",), ("text",)):
+                candidate = _stringify_event_path(choice, path)
+                if candidate:
+                    return candidate
+    return None
+
+
+def _stringify_event_path(payload: dict[str, Any], path: tuple[str, ...]) -> str | None:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return _stringify_event_value(current)
+
+
+def _stringify_event_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            rendered = _stringify_event_value(item)
+            if rendered:
+                parts.append(rendered)
+        return " ".join(parts) if parts else None
+    if isinstance(value, dict):
+        for key in ("text", "content", "message"):
+            rendered = _stringify_event_value(value.get(key))
+            if rendered:
+                return rendered
+        try:
+            return json.dumps(value, ensure_ascii=True)
+        except (TypeError, ValueError):
+            return str(value)
+    try:
+        return str(value)
+    except Exception:
+        return None
+
+
+def _wrap_lines(text: str, width: int) -> list[str]:
+    if width <= 0:
+        return [text]
+    return textwrap.wrap(text, width=width) or [""]
+
+
+def _show_message(stdscr: curses._CursesWindow, message: str) -> None:
+    height, width = stdscr.getmaxyx()
+    stdscr.erase()
+    line = message[: max(0, width - 1)]
+    y = max(0, height // 2)
+    x = max(0, (width - len(line)) // 2)
+    _safe_addstr(stdscr, y, x, line)
+    _safe_addstr(stdscr, y + 1, x, "Press any key to return"[: max(0, width - x - 1)])
+    stdscr.refresh()
+    stdscr.timeout(-1)
+    stdscr.getch()
 
 
 FUNNY_NAMES = [

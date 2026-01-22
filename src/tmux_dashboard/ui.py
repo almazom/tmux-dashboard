@@ -25,6 +25,8 @@ class UiState:
     preview: list[WindowInfo] | None
     pane_capture: list[str] | None = None
     sort_mode: SortMode = SortMode.DEFAULT
+    headless_start_index: int | None = None
+    preview_title: str = "Live Preview:"
 
 
 # Margin settings (top, left) - in terminal cells
@@ -68,6 +70,7 @@ class DashboardUI:
             curses.init_pair(6, curses.COLOR_RED, -1)
             curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
             curses.init_pair(8, curses.COLOR_GREEN, curses.COLOR_BLACK)
+            curses.init_pair(9, curses.COLOR_BLUE, -1)
             self.color_pairs = {
                 "title": 1,
                 "selected": 2,
@@ -77,6 +80,7 @@ class DashboardUI:
                 "warning": 6,
                 "help": 7,
                 "ai_session": 8,
+                "headless": 9,
             }
 
     def render(self, state: UiState, preview_lines: int) -> None:
@@ -119,35 +123,57 @@ class DashboardUI:
             self._addstr(top, left, "No sessions found. Press 'n' to create one.")
             return
 
-        start = max(0, state.selected_index - height + 1)
-        end = min(len(sessions), start + height)
+        headless_start = state.headless_start_index
+        row_count = len(sessions) + (1 if headless_start is not None else 0)
+        selected_row_index = state.selected_index
+        if headless_start is not None and state.selected_index >= headless_start:
+            selected_row_index += 1
 
-        for idx, session in enumerate(sessions[start:end], start=start):
-            row = top + (idx - start) * (1 + LINE_SPACING)
+        start = max(0, selected_row_index - height + 1)
+        end = min(row_count, start + height)
 
-            # Number prefix for quick attach (only show for first 9)
-            if idx < 9:
-                num_prefix = f"{idx + 1}. "
-            else:
-                num_prefix = "  "
-            # AI indicator
-            ai_prefix = "🤖 " if session.is_ai_session else ""
-            name = ai_prefix + session.name
-            status = "attached" if session.attached else "detached"
-            windows = f"windows: {session.windows}"
-            label = f"{num_prefix}{name:<18} [{status:<8}] {windows}"
+        row_index = 0
+        interactive_index = 0
+        for idx, session in enumerate(sessions):
+            if headless_start is not None and idx == headless_start:
+                if start <= row_index < end:
+                    row = top + (row_index - start) * (1 + LINE_SPACING)
+                    self._addstr(row, left, "Headless Sessions", self._attr("title"))
+                row_index += 1
 
-            attr = 0
-            if idx == state.selected_index:
-                attr = self._attr("selected")
-            elif session.is_ai_session:
-                attr = self._attr("ai_session")
-            elif session.attached:
-                attr = self._attr("attached")
-            else:
-                attr = self._attr("detached")
+            if start <= row_index < end:
+                row = top + (row_index - start) * (1 + LINE_SPACING)
 
-            self._addstr(row, left, label[: width - 1], attr)
+                if session.is_headless:
+                    num_prefix = "H  "
+                else:
+                    interactive_index += 1
+                    num_prefix = f"{interactive_index}. " if interactive_index <= 9 else "  "
+
+                ai_prefix = "🤖 " if session.is_ai_session and not session.is_headless else ""
+                name = ai_prefix + session.name
+                status = "attached" if session.attached else "detached"
+                if session.is_headless:
+                    agent = session.headless_agent or "headless"
+                    label = f"{num_prefix}{name:<18} [headless:{agent}]"
+                else:
+                    windows = f"windows: {session.windows}"
+                    label = f"{num_prefix}{name:<18} [{status:<8}] {windows}"
+
+                if idx == state.selected_index:
+                    attr = self._attr("selected")
+                elif session.is_headless:
+                    attr = self._attr("headless")
+                elif session.is_ai_session:
+                    attr = self._attr("ai_session")
+                elif session.attached:
+                    attr = self._attr("attached")
+                else:
+                    attr = self._attr("detached")
+
+                self._addstr(row, left, label[: width - 1], attr)
+
+            row_index += 1
 
     def _draw_preview(
         self,
@@ -161,7 +187,7 @@ class DashboardUI:
         if left >= width - 2:
             return
 
-        self._addstr(top, left, "Live Preview:", self._attr("title"))
+        self._addstr(top, left, state.preview_title, self._attr("title"))
 
         # Show captured pane content if available
         if state.pane_capture:
@@ -189,7 +215,7 @@ class DashboardUI:
             self._addstr(top + idx, left, line[: max(1, width - left - 1)])
 
     def _draw_footer(self, state: UiState, height: int, width: int, left: int) -> None:
-        footer = f"Keys: 1-9 quick attach  Up/Down move  Enter attach  n new  d delete  R rename  / search  r refresh  s sort [{state.sort_mode.label}]"
+        footer = f"Keys: 1-9 quick attach  Up/Down move  Enter attach/view  n new  H headless  d delete  R rename  / search  r refresh  s sort [{state.sort_mode.label}]"
         if state.in_search:
             footer = f"Search: {state.filter_text} (Esc to clear)"
         elif state.help_visible:
@@ -208,8 +234,9 @@ class DashboardUI:
         lines = [
             "Help",
             "1-9: quick attach to session",
-            "Enter: attach",
+            "Enter: attach/view",
             "n: create new session",
+            "H: create headless session",
             "d: delete session",
             "/: search",
             "r: refresh",
