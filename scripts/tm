@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# tm - Tmux Manager CLI wrapper
+
+set -eo pipefail
+
+resolve_repo_root() {
+    if [[ -n "${TMUX_DASHBOARD_ROOT:-}" ]]; then
+        echo "$TMUX_DASHBOARD_ROOT"
+        return 0
+    fi
+
+    local source="${BASH_SOURCE[0]}"
+    local dir=""
+    while [[ -h "$source" ]]; do
+        dir="$(cd -P "$(dirname "$source")" && pwd)"
+        source="$(readlink "$source")"
+        [[ $source != /* ]] && source="$dir/$source"
+    done
+
+    dir="$(cd -P "$(dirname "$source")" && pwd)"
+    local root=""
+    root="$(cd "$dir/.." && pwd)"
+    if [[ -d "$root/src/tmux_dashboard" ]]; then
+        echo "$root"
+        return 0
+    fi
+    return 1
+}
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+show_help() {
+    cat << EOF
+${GREEN}tm${NC} - Tmux Manager CLI wrapper
+
+${YELLOW}USAGE:${NC}
+    tm [command] [options]
+
+${YELLOW}COMMANDS:${NC}
+    ${BLUE}dashboard, d, (no args)${NC}    Launch tmux dashboard UI
+    ${BLUE}list, ls${NC}                   List all tmux sessions
+    ${BLUE}new, n [name]${NC}              Create new session (optional name)
+    ${BLUE}attach, a [name]${NC}           Attach to session (or most recent)
+    ${BLUE}detach${NC}                     Detach from current session
+    ${BLUE}kill, k [name]${NC}             Kill a session
+    ${BLUE}rename, r <old> <new>${NC}      Rename a session
+
+${YELLOW}OPTIONS:${NC}
+    -h, --help      Show this help message
+    -v, --version   Show version info
+
+${YELLOW}EXAMPLES:${NC}
+    tm                  Launch dashboard
+    tm list             List sessions
+    tm new myproject    Create session named "myproject"
+    tm attach           Attach to most recent session
+    tm attach myproject Attach to specific session
+    tm kill oldsession  Kill a session
+
+${YELLOW}TMUX SHORTCUTS (when inside tmux):${NC}
+    Ctrl+B, D          Detach from session (keeps running)
+    Ctrl+B, S          List sessions
+    Ctrl+B, $          Rename session
+EOF
+}
+
+list_sessions() {
+    if command -v tmux &> /dev/null; then
+        tmux list-sessions 2>/dev/null || echo "No active tmux sessions"
+    else
+        echo "Error: tmux not found"
+        exit 1
+    fi
+}
+
+new_session() {
+    local name="${1:-}"
+    if [[ -n "$name" ]]; then
+        tmux new-session -d -s "$name"
+        echo "Session '$name' created"
+    else
+        tmux new-session
+    fi
+}
+
+attach_session() {
+    local name="${1:-}"
+    if [[ -n "$name" ]]; then
+        tmux attach-session -t "$name"
+    else
+        # Attach to most recent session
+        tmux attach-session
+    fi
+}
+
+kill_session() {
+    local name="${1:-}"
+    if [[ -z "$name" ]]; then
+        echo "Error: session name required"
+        echo "Usage: tm kill <session-name>"
+        echo "Use 'tm list' to see active sessions"
+        exit 1
+    fi
+    tmux kill-session -t "$name"
+    echo "Session '$name' killed"
+}
+
+rename_session() {
+    local old_name="$1"
+    local new_name="$2"
+    if [[ -z "$old_name" ]] || [[ -z "$new_name" ]]; then
+        echo "Error: both old and new names required"
+        echo "Usage: tm rename <old-name> <new-name>"
+        exit 1
+    fi
+    tmux rename-session -t "$old_name" "$new_name"
+    echo "Session renamed from '$old_name' to '$new_name'"
+}
+
+# Main command parsing
+case "${1:-}" in
+    -h|--help|help)
+        show_help
+        ;;
+    -v|--version|version)
+        echo "tm - Tmux Manager v1.0.0"
+        ;;
+    list|ls)
+        list_sessions
+        ;;
+    new|n)
+        new_session "${2:-}"
+        ;;
+    attach|a)
+        attach_session "${2:-}"
+        ;;
+    detach)
+        tmux detach-client
+        ;;
+    kill|k)
+        kill_session "${2:-}"
+        ;;
+    rename|r)
+        rename_session "$2" "$3"
+        ;;
+    dashboard|d|"")
+        if command -v tmux-dashboard >/dev/null 2>&1; then
+            tmux-dashboard
+            exit 0
+        fi
+
+        repo_root="$(resolve_repo_root || true)"
+        if [[ -z "$repo_root" ]]; then
+            echo "Error: tmux-dashboard repo not found. Set TMUX_DASHBOARD_ROOT or install tmux-dashboard." >&2
+            exit 1
+        fi
+        PYTHONPATH="${repo_root}/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m tmux_dashboard
+        ;;
+    *)
+        echo "Unknown command: $1"
+        echo "Use 'tm -h' for help"
+        exit 1
+        ;;
+esac
