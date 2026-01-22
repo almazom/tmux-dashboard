@@ -72,3 +72,5 @@ class SessionInfo:
     attached: bool
     windows: int
     is_ai_session: bool = False
+    is_headless: bool = False
+    headless_agent: str | None = None

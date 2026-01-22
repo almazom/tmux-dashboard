@@ -21,6 +21,8 @@ AI_KEYWORDS = [
     "openai",
     "copilot",
     "cursor",
+    "codex",
+    "cladcode",
 ]
 
 try:
@@ -377,6 +379,21 @@ class TmuxManager:
         subprocess.run([
             "tmux", "send-keys", "-t", f"{name}:0", "clear", "Enter"
         ], capture_output=True)
+
+    def create_session_with_command(self, name: str, command: list[str], directory: str | None = None) -> None:
+        """Create a new tmux session and run a command in its first window."""
+        target_dir = str(Path.cwd()) if directory is None else directory
+        if not command:
+            raise TmuxError("tmux command missing")
+
+        result = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", name, "-c", target_dir, *command],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise TmuxError(result.stderr.strip() or "tmux new-session failed")
+        self._rename_window(name, name)
 
     def attach_command(self, name: str) -> list[str]:
         # Check if already inside tmux
