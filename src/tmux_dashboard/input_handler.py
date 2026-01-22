@@ -78,7 +78,7 @@ def run_dashboard(
 
             preview = None
             pane_capture = None
-            preview_title = cached_preview_title
+            preview_title = "Live Preview:"
             if ordered and config.preview_lines > 0:
                 selected_session = ordered[selected_index]
                 current_session = selected_session.name
@@ -558,9 +558,9 @@ def _apply_headless_metadata(
                     name=session.name,
                     attached=session.attached,
                     windows=session.windows,
-                    is_ai_session=session.is_ai_session or True,
+                    is_ai_session=True,
                     is_headless=True,
-                    headless_agent=getattr(headless, "agent", None),
+                    headless_agent=headless.agent,
                 )
             )
         else:
