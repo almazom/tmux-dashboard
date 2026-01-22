@@ -6,7 +6,6 @@ import argparse
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Optional
 
 from .config import load_config
 from .input_handler import run_dashboard
@@ -19,6 +18,24 @@ from .tmux_manager import TmuxError, TmuxManager
 class PendingStatus:
     message: str
     level: str = "info"
+
+
+def _attach_and_rename(
+    tmux: TmuxManager,
+    session_name: str,
+    logger: Logger,
+    auto_rename_on_detach: bool,
+    event: str,
+) -> str | None:
+    try:
+        subprocess.run(tmux.attach_command(session_name))
+    except OSError as exc:
+        logger.error(event, str(exc), session_name)
+        return str(exc)
+
+    if auto_rename_on_detach:
+        tmux.rename_session_to_project(session_name)
+    return None
 
 
 def run() -> None:
@@ -38,10 +55,14 @@ def run() -> None:
             if target_session:
                 # Tmux has sessions - attach to the most recent one
                 logger.info("auto_attach", "another dashboard running, attaching to session")
-                subprocess.run(tmux.attach_command(target_session.name))
-                if config.auto_rename_on_detach:
-                    # After detach, rename to project folder name
-                    tmux.rename_session_to_project(target_session.name)
+                if _attach_and_rename(
+                    tmux,
+                    target_session.name,
+                    logger,
+                    config.auto_rename_on_detach,
+                    event="auto_attach",
+                ):
+                    return
                 return  # Exit after attaching
             else:
                 # No tmux sessions exist - just exit
@@ -52,7 +73,7 @@ def run() -> None:
             return
 
     # We have the lock - this is the only dashboard instance
-    pending_status: Optional[PendingStatus] = None
+    pending_status: PendingStatus | None = None
 
     try:
         # Auto-create flow: Check if no sessions exist and auto_create is enabled
@@ -68,10 +89,15 @@ def run() -> None:
                         logger.info("auto_create", f"session created: {session_name}")
                         # Attach directly to the new session, bypassing dashboard
                         logger.info("auto_create", f"auto-attaching to session: {session_name}")
-                        subprocess.run(tmux.attach_command(session_name))
-                        if config.auto_rename_on_detach:
-                            # After detach, rename to project folder name
-                            tmux.rename_session_to_project(session_name)
+                        error = _attach_and_rename(
+                            tmux,
+                            session_name,
+                            logger,
+                            config.auto_rename_on_detach,
+                            event="auto_create",
+                        )
+                        if error:
+                            pending_status = PendingStatus(error, level="error")
                     except TmuxError as exc:
                         logger.error("auto_create", str(exc), session_name)
                         pending_status = PendingStatus(str(exc), level="error")
@@ -99,14 +125,16 @@ def run() -> None:
                         pending_status = PendingStatus(str(exc), level="error")
                         continue
 
-                try:
-                    logger.info("attach", "attaching session", action.session_name)
-                    subprocess.run(tmux.attach_command(action.session_name))
-                    if config.auto_rename_on_detach:
-                        tmux.rename_session_to_project(action.session_name)
-                except OSError as exc:
-                    pending_status = PendingStatus(str(exc), level="error")
-                    logger.error("attach", str(exc), action.session_name)
+                logger.info("attach", "attaching session", action.session_name)
+                error = _attach_and_rename(
+                    tmux,
+                    action.session_name,
+                    logger,
+                    config.auto_rename_on_detach,
+                    event="attach",
+                )
+                if error:
+                    pending_status = PendingStatus(error, level="error")
     finally:
         lock.release()
 
@@ -156,7 +184,7 @@ Keybindings in Dashboard:
     )
 
     # Parse args - currently no runtime args, just help/version
-    args = parser.parse_args()
+    parser.parse_args()
 
     try:
         run()

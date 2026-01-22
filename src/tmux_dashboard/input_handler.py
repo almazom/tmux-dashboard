@@ -7,7 +7,6 @@ import random
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 from .config import Config
 from .logger import Logger
@@ -19,16 +18,16 @@ from .ui import DashboardUI, UiState, UiStatus
 @dataclass
 class Action:
     kind: str
-    session_name: Optional[str] = None
+    session_name: str | None = None
 
 
 def run_dashboard(
     tmux: TmuxManager,
     config: Config,
     logger: Logger,
-    pending_status: Optional[object] = None,
-) -> Optional[Action]:
-    def _main(stdscr: "curses._CursesWindow") -> Optional[Action]:
+    pending_status: object | None = None,
+) -> Action | None:
+    def _main(stdscr: curses._CursesWindow) -> Action | None:
         ui = DashboardUI(stdscr, config.color)
         ui.init()
 
@@ -44,7 +43,6 @@ def run_dashboard(
         if list_status:
             status = list_status
         selected_index = 0
-        last_attached_session: str | None = None  # Track last attached session
         filter_text = ""
         in_search = False
         help_visible = False
@@ -139,21 +137,15 @@ def run_dashboard(
                 num = key - 48  # Convert to 1-9
                 if num <= len(filtered):
                     session_name = filtered[num - 1].name
-                    last_attached_session = session_name
-                    actual_session_name = _do_attach(
+                    sessions, status, selected_index, _ = _attach_and_refresh(
                         stdscr,
                         tmux,
                         session_name,
                         logger,
+                        sort_mode,
+                        filter_text,
                         auto_rename_on_detach=config.auto_rename_on_detach,
                     )
-                    last_attached_session = actual_session_name or session_name
-                    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
-                    status = list_status or UiStatus(f"Returned from {last_attached_session}", level="info")
-                    filtered = _filter_sessions(sessions, filter_text)
-                    if last_attached_session:
-                        new_index = _find_session_index(filtered, last_attached_session)
-                        selected_index = new_index
                     continue
                 else:
                     status = UiStatus(f"No session #{num}", level="warning")
@@ -169,31 +161,15 @@ def run_dashboard(
                 if filtered:
                     # Handle attach within the curses context
                     session_name = filtered[selected_index].name
-                    last_attached_session = session_name  # Remember which session we attached to
-                    actual_session_name = _do_attach(
+                    sessions, status, selected_index, _ = _attach_and_refresh(
                         stdscr,
                         tmux,
                         session_name,
                         logger,
+                        sort_mode,
+                        filter_text,
                         auto_rename_on_detach=config.auto_rename_on_detach,
                     )
-                    # Update last_attached_session with the new name if it was renamed
-                    last_attached_session = actual_session_name or session_name
-                    # Refresh session list after returning from attach
-                    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
-                    status = list_status or UiStatus(f"Returned from {last_attached_session}", level="info")
-                    # Re-apply filter and restore cursor to the session we just detached from
-                    filtered = _filter_sessions(sessions, filter_text)
-                    if last_attached_session:
-                        new_index = _find_session_index(filtered, last_attached_session)
-                        # Debug: log if we couldn't find the session
-                        session_names = [s.name for s in filtered]
-                        if new_index == 0 and filtered and filtered[0].name != last_attached_session:
-                            # Session not found, log for debugging
-                            logger.warn("cursor_restore", f"Session '{last_attached_session}' not found in filtered list: {session_names}")
-                        selected_index = new_index
-                    else:
-                        selected_index = 0
                     continue
                 status = UiStatus("No sessions to attach", level="warning")
                 continue
@@ -292,12 +268,12 @@ def run_dashboard(
 
 
 def _do_attach(
-    stdscr: "curses._CursesWindow",
+    stdscr: curses._CursesWindow,
     tmux: TmuxManager,
     session_name: str,
     logger: Logger,
     auto_rename_on_detach: bool = True,
-) -> Optional[str]:
+) -> str | None:
     """Attach to a tmux session within the curses context.
 
     Returns:
@@ -338,11 +314,46 @@ def _do_attach(
         except curses.error:
             pass
 
-        # Return the actual session name (new or original)
-        return new_name or session_name
+    # Return the actual session name (new or original)
+    return new_name or session_name
 
 
-def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode = SortMode.DEFAULT) -> tuple[list, Optional[UiStatus]]:
+def _attach_and_refresh(
+    stdscr: curses._CursesWindow,
+    tmux: TmuxManager,
+    session_name: str,
+    logger: Logger,
+    sort_mode: SortMode,
+    filter_text: str,
+    auto_rename_on_detach: bool = True,
+) -> tuple[list, UiStatus | None, int, str]:
+    actual_session_name = _do_attach(
+        stdscr,
+        tmux,
+        session_name,
+        logger,
+        auto_rename_on_detach=auto_rename_on_detach,
+    )
+    if not actual_session_name:
+        actual_session_name = session_name
+
+    sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
+    status = list_status or UiStatus(f"Returned from {actual_session_name}", level="info")
+    filtered = _filter_sessions(sessions, filter_text)
+    if filtered:
+        selected_index = _find_session_index(filtered, actual_session_name)
+        if selected_index == 0 and filtered[0].name != actual_session_name:
+            session_names = [s.name for s in filtered]
+            logger.warn(
+                "cursor_restore",
+                f"Session '{actual_session_name}' not found in filtered list: {session_names}",
+            )
+    else:
+        selected_index = 0
+    return sessions, status, selected_index, actual_session_name
+
+
+def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode = SortMode.DEFAULT) -> tuple[list, UiStatus | None]:
     try:
         return tmux.list_sessions(sort_mode), None
     except TmuxError as exc:
@@ -371,50 +382,7 @@ def _find_session_index(sessions: list, session_name: str) -> int:
     return 0  # Default to first session if not found
 
 
-def _prompt_input(stdscr: "curses._CursesWindow", prompt: str) -> Optional[str]:
-    height, width = stdscr.getmaxyx()
-    try:
-        curses.curs_set(1)
-    except curses.error:
-        pass
-    stdscr.nodelay(False)
-
-    buffer: list[str] = []
-    while True:
-        try:
-            stdscr.move(height - 1, 0)
-            stdscr.clrtoeol()
-        except curses.error:
-            pass
-        display = f"{prompt}{''.join(buffer)}"
-        _safe_addstr(stdscr, height - 1, 0, display[: max(0, width - 1)])
-        stdscr.refresh()
-
-        key = stdscr.getch()
-        if key in (10, 13):
-            break
-        if key == 27:  # ESC
-            try:
-                curses.curs_set(0)
-            except curses.error:
-                pass
-            return None
-        if key in (curses.KEY_BACKSPACE, 127, 8):
-            if buffer:
-                buffer.pop()
-            continue
-        if 32 <= key <= 126:
-            buffer.append(chr(key))
-
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        pass
-    value = "".join(buffer).strip()
-    return value or None
-
-
-def _prompt_input_popup(stdscr: "curses._CursesWindow", title: str, default: str = "") -> Optional[str]:
+def _prompt_input_popup(stdscr: curses._CursesWindow, title: str, default: str = "") -> str | None:
     height, width = stdscr.getmaxyx()
     try:
         curses.curs_set(1)
@@ -500,7 +468,7 @@ def _generate_funny_name() -> str:
 
 
 def _confirm_dialog(
-    stdscr: "curses._CursesWindow",
+    stdscr: curses._CursesWindow,
     title: str,
     lines: list[str],
 ) -> bool:
@@ -530,7 +498,7 @@ def _confirm_dialog(
             return False
 
 
-def _safe_addstr(stdscr: "curses._CursesWindow", y: int, x: int, text: str) -> None:
+def _safe_addstr(stdscr: curses._CursesWindow, y: int, x: int, text: str) -> None:
     height, width = stdscr.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
         return
