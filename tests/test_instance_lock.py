@@ -6,7 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from tmux_dashboard.instance_lock import (
     InstanceLock,
@@ -350,7 +350,7 @@ class TestErrorHandling(unittest.TestCase):
         try:
             lock = InstanceLock(lock_file=self.lock_file, pid_file=self.pid_file)
             # Should handle permission errors gracefully
-            result = lock.acquire()
+            lock.acquire()
             # May succeed or fail depending on system, but shouldn't crash
         finally:
             # Restore permissions

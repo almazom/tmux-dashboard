@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import curses
 from dataclasses import dataclass
-from typing import Optional
 
 from .models import SessionInfo, SortMode, WindowInfo
 
@@ -22,9 +21,9 @@ class UiState:
     filter_text: str
     in_search: bool
     help_visible: bool
-    status: Optional[UiStatus]
-    preview: Optional[list[WindowInfo]]
-    pane_capture: Optional[list[str]] = None
+    status: UiStatus | None
+    preview: list[WindowInfo] | None
+    pane_capture: list[str] | None = None
     sort_mode: SortMode = SortMode.DEFAULT
 
 
@@ -37,7 +36,7 @@ LINE_SPACING = 0
 
 
 class DashboardUI:
-    def __init__(self, stdscr: "curses._CursesWindow", color_mode: str) -> None:
+    def __init__(self, stdscr: curses._CursesWindow, color_mode: str) -> None:
         self.stdscr = stdscr
         self.color_mode = color_mode
         self.colors_enabled = False

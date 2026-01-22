@@ -16,10 +16,9 @@ import errno
 import fcntl
 import os
 import sys
-import time
 import threading
+import time
 from pathlib import Path
-from typing import Optional
 
 # Lock file location
 DEFAULT_LOCK_FILE = Path.home() / ".local" / "state" / "tmux-dashboard" / "lock"
@@ -30,7 +29,7 @@ _PROCESS_LOCK = threading.Lock()
 _PROCESS_LOCK_HELD = False
 
 
-def _resolve_path(value: Optional[Path], env_var: str, default: Path) -> Path:
+def _resolve_path(value: Path | None, env_var: str, default: Path) -> Path:
     if value is not None:
         return value
     env_value = os.environ.get(env_var)
@@ -69,8 +68,8 @@ class InstanceLock:
 
     def __init__(
         self,
-        lock_file: Optional[Path] = None,
-        pid_file: Optional[Path] = None,
+        lock_file: Path | None = None,
+        pid_file: Path | None = None,
         timeout: float = 5.0
     ) -> None:
         """Initialize the instance lock.
@@ -83,8 +82,8 @@ class InstanceLock:
         self.lock_file = _resolve_path(lock_file, ENV_LOCK_FILE, DEFAULT_LOCK_FILE)
         self.pid_file = _resolve_path(pid_file, ENV_PID_FILE, DEFAULT_PID_FILE)
         self.timeout = timeout
-        self._lock_fd: Optional[int] = None
-        self._pid: Optional[int] = None
+        self._lock_fd: int | None = None
+        self._pid: int | None = None
         self._lock = threading.RLock()  # Internal thread safety
         self._process_lock_acquired = False
 
@@ -161,7 +160,7 @@ class InstanceLock:
         global _PROCESS_LOCK_HELD
         _PROCESS_LOCK_HELD = held
 
-    def _try_fcntl_lock(self) -> Optional[bool]:
+    def _try_fcntl_lock(self) -> bool | None:
         """Try to acquire lock using fcntl (Unix file locking).
 
         Returns:
@@ -275,7 +274,7 @@ class InstanceLock:
 
             # Check if lock file exists and is locked
             try:
-                with open(self.lock_file, "r") as f:
+                with open(self.lock_file) as f:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                     fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                     return False  # We can lock it, so it's not locked
@@ -300,7 +299,7 @@ class InstanceLock:
                     return True
             return False
 
-    def get_lock_info(self) -> dict[str, Optional[str]]:
+    def get_lock_info(self) -> dict[str, str | None]:
         """Get information about the current lock state.
 
         Returns:
@@ -316,7 +315,7 @@ class InstanceLock:
         # Try to get information about the locking process
         try:
             if self.lock_file.exists():
-                with open(self.lock_file, "r") as f:
+                with open(self.lock_file) as f:
                     content = f.read().strip()
                     if content:
                         info["locking_pid"] = content
@@ -352,8 +351,8 @@ class InstanceLock:
 
 
 def ensure_single_instance(
-    lock_file: Optional[Path] = None,
-    pid_file: Optional[Path] = None,
+    lock_file: Path | None = None,
+    pid_file: Path | None = None,
     timeout: float = 5.0,
     exit_on_conflict: bool = True,
     verbose: bool = True
@@ -403,7 +402,7 @@ def ensure_single_instance(
     return lock
 
 
-def cleanup_stale_locks(lock_file: Optional[Path] = None, pid_file: Optional[Path] = None) -> bool:
+def cleanup_stale_locks(lock_file: Path | None = None, pid_file: Path | None = None) -> bool:
     """Clean up stale lock files from crashed instances.
 
     Args:
@@ -436,13 +435,13 @@ def cleanup_stale_locks(lock_file: Optional[Path] = None, pid_file: Optional[Pat
     # Clean up lock file if it exists but isn't locked
     if lock_file.exists():
         try:
-            with open(lock_file, "r") as f:
+            with open(lock_file) as f:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 fcntl.flock(f.fileno(), fcntl.LOCK_UN)
                 # File wasn't locked, remove it
                 lock_file.unlink()
                 print(f"🧹 Removed stale lock file: {lock_file}")
-        except (IOError, OSError):
+        except OSError:
             # File is locked by another process, leave it
             pass
         except Exception:
@@ -452,13 +451,13 @@ def cleanup_stale_locks(lock_file: Optional[Path] = None, pid_file: Optional[Pat
 
 
 # Module-level convenience functions
-def is_locked(lock_file: Optional[Path] = None, pid_file: Optional[Path] = None) -> bool:
+def is_locked(lock_file: Path | None = None, pid_file: Path | None = None) -> bool:
     """Check if tmux-dashboard is currently locked (another instance running)."""
     lock = InstanceLock(lock_file=lock_file, pid_file=pid_file)
     return lock.is_locked()
 
 
-def get_status(lock_file: Optional[Path] = None, pid_file: Optional[Path] = None) -> dict[str, Optional[str]]:
+def get_status(lock_file: Path | None = None, pid_file: Path | None = None) -> dict[str, str | None]:
     """Get the current lock status."""
     lock = InstanceLock(lock_file=lock_file, pid_file=pid_file)
     return lock.get_lock_info()

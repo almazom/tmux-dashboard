@@ -36,14 +36,14 @@ class SortMode(Enum):
         }
         return descriptions[self]
 
-    def next_mode(self) -> "SortMode":
+    def next_mode(self) -> SortMode:
         """Get the next sort mode in cycle."""
         modes = list(SortMode)
         current_index = modes.index(self)
         return modes[(current_index + 1) % len(modes)]
 
     @classmethod
-    def from_string(cls, value: str) -> "SortMode":
+    def from_string(cls, value: str) -> SortMode:
         """Parse SortMode from string."""
         for mode in cls:
             if mode.value == value.lower():
@@ -51,7 +51,7 @@ class SortMode(Enum):
         return cls.DEFAULT
 
     # Default sort mode
-    DEFAULT: "SortMode" = AI_FIRST
+    DEFAULT: SortMode = AI_FIRST
 
 
 @dataclass(frozen=True)
