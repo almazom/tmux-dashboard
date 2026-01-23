@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import curses
+import os
 import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import Config
-from .prompts import confirm_dialog, draw_center_box, prompt_input_popup
+from .prompts import confirm_dialog, draw_center_box, prompt_input_popup, show_message
 
 
 def prompt_headless_request(
@@ -42,18 +44,199 @@ def prompt_headless_request(
     if model is None:
         return None
 
-    instruction = prompt_input_popup(
-        stdscr,
-        "Headless mode",
-        default="",
-        prompt="Instruction (optional):",
-        max_len=240,
-        allow_empty=True,
-    )
+    instruction = prompt_headless_instruction(stdscr)
     if instruction is None:
         return None
 
     return workdir, agent, model, instruction
+
+
+def prompt_headless_instruction(stdscr: curses._CursesWindow) -> str | None:
+    while True:
+        method = prompt_instruction_source(stdscr)
+        if method is None:
+            return None
+        if method == "popup":
+            instruction = prompt_input_popup(
+                stdscr,
+                "Headless mode",
+                default="",
+                prompt="Instruction:",
+                max_len=4000,
+                allow_empty=True,
+            )
+        elif method == "editor":
+            instruction = read_instruction_from_editor(stdscr)
+        elif method == "tmux":
+            instruction = read_instruction_from_tmux()
+            if instruction is None:
+                show_message(stdscr, "tmux buffer is empty or unavailable.")
+                continue
+        elif method == "file":
+            instruction = read_instruction_from_file(stdscr)
+        else:
+            instruction = None
+
+        if instruction is None:
+            return None
+        if instruction.strip():
+            return instruction
+        show_message(stdscr, "Instruction is required.")
+
+
+def prompt_instruction_source(stdscr: curses._CursesWindow) -> str | None:
+    height, width = stdscr.getmaxyx()
+    stdscr.nodelay(False)
+    try:
+        curses.curs_set(0)
+    except curses.error:
+        pass
+
+    lines = [
+        "Instruction input",
+        "1) Editor ($EDITOR) - long text",
+        "2) Paste from tmux buffer",
+        "3) Load from file",
+        "4) Quick input (single line)",
+        "Enter: editor  Esc: cancel",
+    ]
+    draw_center_box(stdscr, "Instruction", lines, width, height)
+    while True:
+        key = stdscr.getch()
+        if key == 27:
+            return None
+        if key in (10, 13):
+            return "editor"
+        if key == ord("1"):
+            return "editor"
+        if key == ord("2"):
+            return "tmux"
+        if key == ord("3"):
+            return "file"
+        if key == ord("4"):
+            return "popup"
+
+
+def _resolve_editor_command() -> list[str] | None:
+    env_editor = os.environ.get("EDITOR")
+    if env_editor:
+        try:
+            args = shlex.split(env_editor)
+        except ValueError:
+            args = [env_editor]
+        if args and shutil.which(args[0]):
+            return args
+
+    for candidate in ("nano", "vi"):
+        if shutil.which(candidate):
+            return [candidate]
+    return None
+
+
+def read_instruction_from_editor(stdscr: curses._CursesWindow) -> str:
+    editor_cmd = _resolve_editor_command()
+    if not editor_cmd:
+        show_message(stdscr, "No editor found. Set $EDITOR.")
+        return ""
+
+    fd, path = tempfile.mkstemp(prefix="tmux-dashboard-", suffix=".txt")
+    os.close(fd)
+    try:
+        _run_external_editor(stdscr, editor_cmd, path)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                return handle.read().rstrip("\n")
+        except OSError:
+            show_message(stdscr, "Failed to read editor buffer.")
+            return ""
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _run_external_editor(stdscr: curses._CursesWindow, command: list[str], path: str) -> None:
+    try:
+        curses.def_prog_mode()
+    except curses.error:
+        pass
+    try:
+        curses.endwin()
+    except curses.error:
+        pass
+
+    try:
+        subprocess.run([*command, path], check=False)
+    finally:
+        try:
+            curses.reset_prog_mode()
+        except curses.error:
+            pass
+        try:
+            curses.doupdate()
+        except curses.error:
+            pass
+        try:
+            stdscr.clear()
+            stdscr.refresh()
+        except curses.error:
+            pass
+        try:
+            curses.noecho()
+            curses.cbreak()
+            stdscr.keypad(True)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+        except curses.error:
+            pass
+        try:
+            curses.flushinp()
+        except curses.error:
+            pass
+
+
+def read_instruction_from_tmux() -> str | None:
+    if not shutil.which("tmux"):
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "show-buffer"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    text = result.stdout.rstrip("\n")
+    return text if text.strip() else None
+
+
+def read_instruction_from_file(stdscr: curses._CursesWindow) -> str | None:
+    path = prompt_input_popup(
+        stdscr,
+        "Instruction file",
+        default="",
+        prompt="Path:",
+        max_len=200,
+        allow_empty=False,
+    )
+    if path is None:
+        return None
+    value = path.strip()
+    if not value:
+        show_message(stdscr, "Path is required.")
+        return ""
+    try:
+        with open(os.path.expanduser(value), encoding="utf-8", errors="replace") as handle:
+            return handle.read().rstrip("\n")
+    except OSError:
+        show_message(stdscr, f"Failed to read file: {value}")
+        return ""
 
 
 def prompt_headless_model(stdscr: curses._CursesWindow, config: Config, agent_raw: str) -> str | None:

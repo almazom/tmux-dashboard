@@ -308,6 +308,9 @@ def run_dashboard(
                 if not workdir_path.exists() or not workdir_path.is_dir():
                     status = UiStatus(f"Invalid directory: {workdir_raw}", level="error")
                     continue
+                if not instruction.strip():
+                    status = UiStatus("Instruction is required for headless session", level="error")
+                    continue
 
                 agent = agent_raw.strip().lower()
                 if not agent:
