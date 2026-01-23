@@ -3,19 +3,12 @@
 from __future__ import annotations
 
 import curses
-import json
 import random
 import re
-import shlex
-import shutil
-import subprocess
-import textwrap
 import time
-from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from .config import Config
 from .headless import (
@@ -24,8 +17,18 @@ from .headless import (
     build_headless_session,
     build_headless_shell_command,
 )
+from .headless_prompts import prompt_headless_request
+from .headless_state import (
+    apply_headless_metadata,
+    auto_cleanup_headless,
+    collect_headless_status,
+    sync_headless_completion,
+)
+from .headless_view import HeadlessLogTail, run_headless_view
 from .logger import Logger
 from .models import SessionInfo, SortMode
+from .prompts import confirm_dialog, prompt_input_popup
+from .session_actions import do_attach
 from .tmux_manager import TmuxError, TmuxManager
 from .ui import DashboardUI, UiState, UiStatus
 
@@ -176,7 +179,7 @@ def run_dashboard(
                     if ordered:
                         target = ordered[selected_index]
                         if target.is_headless:
-                            _view_headless_session(
+                            run_headless_view(
                                 stdscr,
                                 target.name,
                                 tmux,
@@ -244,7 +247,7 @@ def run_dashboard(
                     # Handle attach/view within the curses context
                     selected_session = ordered[selected_index]
                     if selected_session.is_headless:
-                        _view_headless_session(
+                        run_headless_view(
                             stdscr,
                             selected_session.name,
                             tmux,
@@ -278,7 +281,7 @@ def run_dashboard(
                 continue
             if key == ord("n"):
                 # Prompt with empty default - user can type name or press Enter for random
-                name = _prompt_input_popup(stdscr, "New tmux session", default="")
+                name = prompt_input_popup(stdscr, "New tmux session", default="")
                 if name is None:
                     status = UiStatus("Create canceled", level="warning")
                     continue
@@ -295,7 +298,7 @@ def run_dashboard(
                         counter += 1
                 return Action(kind="create", session_name=name)
             if key == ord("H"):
-                request = _prompt_headless_request(stdscr, config)
+                request = prompt_headless_request(stdscr, config)
                 if request is None:
                     status = UiStatus("Headless create canceled", level="warning")
                     continue
@@ -354,7 +357,7 @@ def run_dashboard(
                     )
                     headless_registry.record(headless_session)
                     logger.info("headless_create", f"headless session created: {agent}", session_name)
-                    _view_headless_session(
+                    run_headless_view(
                         stdscr,
                         session_name,
                         tmux,
@@ -384,7 +387,7 @@ def run_dashboard(
                     logger.warn("delete", "dry-run blocked delete", target.name)
                     continue
                 warning = "Attached session" if target.attached else "Detached session"
-                confirm = _confirm_dialog(
+                confirm = confirm_dialog(
                     stdscr,
                     title="Delete session",
                     lines=[
@@ -419,7 +422,7 @@ def run_dashboard(
                 if target.is_headless:
                     status = UiStatus("Headless sessions cannot be renamed yet", level="warning")
                     continue
-                new_name = _prompt_input_popup(stdscr, "Rename session")
+                new_name = prompt_input_popup(stdscr, "Rename session")
                 if new_name and new_name != target.name:
                     try:
                         tmux.rename_session(target.name, new_name)
@@ -477,57 +480,6 @@ def run_dashboard(
     return curses.wrapper(_main)
 
 
-def _do_attach(
-    stdscr: curses._CursesWindow,
-    tmux: TmuxManager,
-    session_name: str,
-    logger: Logger,
-    auto_rename_on_detach: bool = True,
-) -> str | None:
-    """Attach to a tmux session within the curses context.
-
-    Returns:
-        The new session name if it was renamed, otherwise the original name.
-    """
-    # End curses mode temporarily
-    curses.endwin()
-
-    try:
-        logger.info("attach", f"attaching to {session_name}")
-        cmd = tmux.attach_command(session_name)
-        result = subprocess.run(cmd)
-        logger.info("attach", f"returned from {session_name}, exit code: {result.returncode}")
-    except OSError as exc:
-        logger.error("attach", str(exc), session_name)
-    finally:
-        new_name = None
-        if auto_rename_on_detach:
-            # Auto-rename session to project folder name on detach
-            new_name = tmux.rename_session_to_project(session_name)
-            if new_name:
-                logger.info("rename", f"auto-renamed session from {session_name} to {new_name}")
-
-        # Reinitialize curses after returning
-        curses.doupdate()
-        # Clear and refresh the screen
-        stdscr.clear()
-        stdscr.refresh()
-        # Re-apply UI settings
-        try:
-            curses.noecho()
-            curses.cbreak()
-            stdscr.keypad(True)
-            try:
-                curses.curs_set(0)
-            except curses.error:
-                pass
-        except curses.error:
-            pass
-
-    # Return the actual session name (new or original)
-    return new_name or session_name
-
-
 def _attach_and_refresh(
     stdscr: curses._CursesWindow,
     tmux: TmuxManager,
@@ -539,7 +491,7 @@ def _attach_and_refresh(
     config: Config,
     auto_rename_on_detach: bool = True,
 ) -> tuple[list, dict[str, HeadlessSession], UiStatus | None, int, str]:
-    actual_session_name = _do_attach(
+    actual_session_name = do_attach(
         stdscr,
         tmux,
         session_name,
@@ -602,9 +554,9 @@ def _refresh_sessions(
 ) -> tuple[list[SessionInfo], dict[str, HeadlessSession], UiStatus | None]:
     sessions, list_status = _safe_list_sessions(tmux, logger, sort_mode)
     headless_map = headless_registry.load_all()
-    status_map = _collect_headless_status(tmux, headless_map)
+    status_map = collect_headless_status(tmux, headless_map)
     if headless_map:
-        headless_map = _sync_headless_completion(
+        headless_map = sync_headless_completion(
             headless_registry,
             logger,
             headless_map,
@@ -612,93 +564,15 @@ def _refresh_sessions(
             config.headless_notify_on_complete,
         )
     if headless_map and config.headless_auto_cleanup:
-        headless_map = _auto_cleanup_headless(
+        headless_map = auto_cleanup_headless(
             tmux,
             headless_registry,
             logger,
             headless_map,
             status_map,
         )
-    sessions = _apply_headless_metadata(sessions, headless_map, status_map)
+    sessions = apply_headless_metadata(sessions, headless_map, status_map)
     return sessions, headless_map, list_status
-
-
-def _apply_headless_metadata(
-    sessions: list[SessionInfo],
-    headless_map: dict[str, HeadlessSession],
-    status_map: dict[str, object],
-) -> list[SessionInfo]:
-    if not headless_map:
-        return sessions
-    enriched: list[SessionInfo] = []
-    known_names = {session.name for session in sessions}
-    for session in sessions:
-        headless = headless_map.get(session.name)
-        if headless:
-            status = status_map.get(session.name)
-            status_text = _status_to_label(status)
-            exit_code = getattr(status, "exit_code", None) if status else None
-            enriched.append(
-                SessionInfo(
-                    name=session.name,
-                    attached=session.attached,
-                    windows=session.windows,
-                    is_ai_session=True,
-                    ai_agent=headless.agent,
-                    is_headless=True,
-                    headless_agent=headless.agent,
-                    headless_model=headless.model,
-                    headless_status=status_text,
-                    headless_exit_code=exit_code,
-                )
-            )
-        else:
-            enriched.append(session)
-    missing = [name for name in headless_map.keys() if name not in known_names]
-    for name in sorted(missing):
-        headless = headless_map[name]
-        status = status_map.get(name)
-        status_text = _status_to_label(status)
-        exit_code = getattr(status, "exit_code", None) if status else None
-        enriched.append(
-            SessionInfo(
-                name=headless.session_name,
-                attached=False,
-                windows=0,
-                is_ai_session=True,
-                ai_agent=headless.agent,
-                is_headless=True,
-                headless_agent=headless.agent,
-                headless_model=headless.model,
-                headless_status=status_text,
-                headless_exit_code=exit_code,
-            )
-        )
-    return enriched
-
-
-def _auto_cleanup_headless(
-    tmux: TmuxManager,
-    headless_registry: HeadlessRegistry,
-    logger: Logger,
-    headless_map: dict[str, HeadlessSession],
-    status_map: dict[str, object],
-) -> dict[str, HeadlessSession]:
-    cleaned = dict(headless_map)
-    for name, _meta in list(headless_map.items()):
-        status = status_map.get(name) or tmux.get_session_runtime_status(name)
-        if status.exists and status.running:
-            continue
-        if status.exists:
-            try:
-                tmux.kill_session(name)
-            except TmuxError as exc:
-                logger.error("headless_cleanup", str(exc), name)
-                continue
-        headless_registry.forget(name)
-        cleaned.pop(name, None)
-        logger.info("headless_cleanup", "headless session cleaned", name)
-    return cleaned
 
 
 def _group_headless_sessions(
@@ -709,119 +583,6 @@ def _group_headless_sessions(
     ordered = interactive + headless
     headless_start_index = len(interactive) if headless else None
     return ordered, headless_start_index, interactive
-
-
-def _collect_headless_status(
-    tmux: TmuxManager,
-    headless_map: dict[str, HeadlessSession],
-) -> dict[str, object]:
-    status_map: dict[str, object] = {}
-    for name in headless_map.keys():
-        status_map[name] = tmux.get_session_runtime_status(name)
-    return status_map
-
-
-def _status_to_label(status: object) -> str:
-    if not status:
-        return "unknown"
-    exists = getattr(status, "exists", False)
-    running = getattr(status, "running", False)
-    if not exists:
-        return "missing"
-    if running:
-        return "running"
-    return "completed"
-
-
-def _sync_headless_completion(
-    headless_registry: HeadlessRegistry,
-    logger: Logger,
-    headless_map: dict[str, HeadlessSession],
-    status_map: dict[str, object],
-    notify_on_complete: bool,
-) -> dict[str, HeadlessSession]:
-    updated = dict(headless_map)
-    for name, meta in headless_map.items():
-        status = status_map.get(name)
-        if not status or getattr(status, "running", False):
-            continue
-        if meta.completed_at:
-            continue
-
-        completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        exit_code = getattr(status, "exit_code", None)
-        last_raw = _read_last_raw_line(meta.output_path)
-        updated_ok = headless_registry.update(
-            name,
-            {
-                "completed_at": completed_at,
-                "exit_code": exit_code,
-                "last_raw_line": last_raw,
-            },
-            base=meta,
-        )
-        if not updated_ok:
-            logger.warn("headless_update", "failed to update metadata", name)
-            continue
-        updated[name] = HeadlessSession(
-            session_name=meta.session_name,
-            agent=meta.agent,
-            model=meta.model,
-            flow=meta.flow,
-            instruction=meta.instruction,
-            workdir=meta.workdir,
-            output_path=meta.output_path,
-            created_at=meta.created_at,
-            completed_at=completed_at,
-            exit_code=exit_code,
-            last_raw_line=last_raw,
-            command=meta.command,
-        )
-        if notify_on_complete:
-            _notify_headless_complete(logger, updated[name])
-
-    return updated
-
-
-def _read_last_raw_line(path: str) -> str | None:
-    try:
-        with open(path, "rb") as handle:
-            handle.seek(0, 2)
-            size = handle.tell()
-            if size == 0:
-                return None
-            offset = min(size, 4096)
-            handle.seek(-offset, 2)
-            chunk = handle.read().decode("utf-8", errors="replace")
-    except OSError:
-        return None
-
-    lines = [line for line in chunk.splitlines() if line.strip()]
-    return lines[-1].strip() if lines else None
-
-
-def _notify_headless_complete(logger: Logger, session: HeadlessSession) -> None:
-    if not shutil.which("t2me"):
-        logger.warn("headless_notify", "t2me not found", session.session_name)
-        return
-    summary = _summarize_prompt(session.instruction or "")
-    summary_text = "\n".join(f"- {line}" for line in summary)
-    raw_line = session.last_raw_line or "(no output)"
-    message = (
-        f"✅ Headless done: {session.session_name}\n"
-        f"Agent: {session.agent}\n"
-        f"Model: {session.model or 'default'}\n"
-        f"Flow: {session.flow or '-'}\n"
-        f"Path: {session.workdir}\n"
-        f"Exit: {session.exit_code}\n"
-        f"Output: {session.output_path}\n"
-        f"Prompt:\n{summary_text}\n"
-        f"Last raw:\n{raw_line}"
-    )
-    try:
-        subprocess.run(["t2me", message], check=False)
-    except OSError as exc:
-        logger.error("headless_notify", str(exc), session.session_name)
 
 
 def _filter_sessions(sessions: list, filter_text: str) -> list:
@@ -843,333 +604,6 @@ def _find_session_index(sessions: list, session_name: str) -> int:
         if session.name == session_name:
             return idx
     return 0  # Default to first session if not found
-
-
-def _prompt_input_popup(
-    stdscr: curses._CursesWindow,
-    title: str,
-    default: str = "",
-    prompt: str = "Enter session name:",
-    help_text: str = "Enter=confirm  Esc=cancel",
-    max_len: int = 50,
-    allow_empty: bool = False,
-) -> str | None:
-    height, width = stdscr.getmaxyx()
-    try:
-        curses.curs_set(1)
-    except curses.error:
-        pass
-    stdscr.nodelay(False)
-
-    # Initialize buffer with default value
-    buffer: list[str] = list(default)
-
-    while True:
-        # Clear center area
-        center_y = height // 2
-        for row in range(center_y - 2, center_y + 3):
-            _safe_addstr(stdscr, row, 0, " " * width)
-
-        # Center the text
-        title_x = max(0, (width - len(title)) // 2)
-        prompt_x = max(0, (width - len(prompt)) // 2)
-        help_x = max(0, (width - len(help_text)) // 2)
-
-        _safe_addstr(stdscr, center_y - 1, title_x, title)
-        _safe_addstr(stdscr, center_y, prompt_x, prompt)
-
-        # Draw input
-        input_display = "".join(buffer)
-        max_input_width = width - 4
-        if len(input_display) > max_input_width:
-            input_display = "~" + input_display[-(max_input_width - 1):]
-        input_x = max(2, (width - len(input_display)) // 2)
-        _safe_addstr(stdscr, center_y + 1, input_x, input_display)
-        try:
-            stdscr.move(center_y + 1, input_x + min(len(input_display), max_input_width))
-        except curses.error:
-            pass
-
-        _safe_addstr(stdscr, center_y + 2, help_x, help_text)
-        stdscr.refresh()
-
-        key = stdscr.getch()
-        if key in (10, 13):
-            break
-        if key == 27:  # ESC
-            try:
-                curses.curs_set(0)
-            except curses.error:
-                pass
-            return None
-        if key in (curses.KEY_BACKSPACE, 127, 8):
-            if buffer:
-                buffer.pop()
-            continue
-        if 32 <= key <= 126:
-            if len(buffer) < max_len:
-                buffer.append(chr(key))
-
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        pass
-    value = "".join(buffer).strip()
-    if value:
-        return value
-    return "" if allow_empty else None
-
-
-def _prompt_headless_request(
-    stdscr: curses._CursesWindow,
-    config: Config,
-) -> tuple[str, str, str, str] | None:
-    workdir_default = str(Path.cwd())
-    workdir = _prompt_input_popup(
-        stdscr,
-        "Headless mode",
-        default=workdir_default,
-        prompt="Workdir:",
-        max_len=200,
-    )
-    if workdir is None:
-        return None
-
-    agent = _prompt_input_popup(
-        stdscr,
-        "Headless mode",
-        default=config.headless_default_agent,
-        prompt="Agent (codex/cladcode):",
-        max_len=32,
-    )
-    if agent is None:
-        return None
-
-    model = _prompt_headless_model(stdscr, config, agent)
-    if model is None:
-        return None
-
-    instruction = _prompt_input_popup(
-        stdscr,
-        "Headless mode",
-        default="",
-        prompt="Instruction (optional):",
-        max_len=240,
-        allow_empty=True,
-    )
-    if instruction is None:
-        return None
-
-    return workdir, agent, model, instruction
-
-
-def _prompt_headless_model(stdscr: curses._CursesWindow, config: Config, agent_raw: str) -> str | None:
-    agent = agent_raw.strip().lower() or config.headless_default_agent
-    models, default_model = _resolve_headless_models(config, agent)
-    list_command = _resolve_headless_model_list_command(config, agent)
-    if not models:
-        prompt = _format_headless_model_prompt(models, list_command)
-        allow_empty = not models and not default_model
-        default_value = default_model or ""
-        while True:
-            model = _prompt_input_popup(
-                stdscr,
-                "Headless mode",
-                default=default_value,
-                prompt=prompt,
-                max_len=64,
-                allow_empty=allow_empty,
-            )
-            if model is None:
-                return None
-            if model.strip().lower() in {"?", "list"}:
-                _show_model_list(stdscr, agent, models, list_command)
-                continue
-            return model
-
-    return _select_headless_model_dialog(
-        stdscr,
-        agent,
-        models,
-        default_model,
-        list_command,
-    )
-
-
-def _resolve_headless_models(config: Config, agent: str) -> tuple[list[str], str | None]:
-    models = config.headless_models.get(agent) or config.headless_models.get("*") or []
-    default_model = (
-        config.headless_default_models.get(agent)
-        or config.headless_default_models.get("*")
-    )
-    if not default_model and models:
-        default_model = models[0]
-    return models, default_model
-
-
-def _format_headless_model_prompt(models: list[str], list_command: str | None) -> str:
-    if not models:
-        if list_command:
-            return "Model (optional, ?=list):"
-        return "Model (optional):"
-    max_items = 4
-    display = ", ".join(models[:max_items])
-    if len(models) > max_items:
-        display = f"{display}, ..."
-    suffix = " ?=list" if list_command else ""
-    return f"Model ({display}){suffix}:"
-
-
-def _select_headless_model_dialog(
-    stdscr: curses._CursesWindow,
-    agent: str,
-    models: list[str],
-    default_model: str | None,
-    list_command: str | None,
-) -> str | None:
-    height, width = stdscr.getmaxyx()
-    stdscr.nodelay(False)
-    try:
-        curses.curs_set(0)
-    except curses.error:
-        pass
-
-    while True:
-        lines: list[str] = []
-        lines.append(f"Select model for {agent}")
-        for idx, model in enumerate(models[:9], start=1):
-            suffix = " (default)" if default_model and model == default_model else ""
-            lines.append(f"{idx}) {model}{suffix}")
-        if len(models) > 9:
-            lines.append("More models available. Use manual entry.")
-        if list_command:
-            lines.append("?: show list from CLI")
-        lines.append("m: manual entry")
-        if default_model:
-            lines.append("Enter: use default")
-        lines.append("Esc: cancel")
-
-        _draw_center_box(stdscr, "Headless model", lines, width, height)
-        key = stdscr.getch()
-        if key == 27:
-            return None
-        if key in (10, 13) and default_model:
-            return default_model
-        if key in (ord("?"), ord("l")):
-            _show_model_list(stdscr, agent, models, list_command)
-            continue
-        if key in (ord("m"), ord("M")):
-            value = _prompt_input_popup(
-                stdscr,
-                "Custom model",
-                default="",
-                prompt="Model name:",
-                max_len=64,
-                allow_empty=False,
-            )
-            if value is None:
-                continue
-            return value
-        if 49 <= key <= 57:
-            idx = key - 49
-            if idx < len(models):
-                return models[idx]
-
-
-def _draw_center_box(
-    stdscr: curses._CursesWindow,
-    title: str,
-    lines: list[str],
-    width: int,
-    height: int,
-) -> None:
-    content_width = max([len(title), *[len(line) for line in lines]])
-    box_width = min(width - 4, content_width + 4)
-    box_height = min(height - 2, len(lines) + 4)
-    top = max(1, (height - box_height) // 2)
-    left = max(1, (width - box_width) // 2)
-
-    for row in range(box_height):
-        _safe_addstr(stdscr, top + row, left, " " * box_width)
-
-    _safe_addstr(stdscr, top + 1, left + 2, title[: box_width - 4])
-    for idx, line in enumerate(lines, start=2):
-        if idx >= box_height - 1:
-            break
-        _safe_addstr(stdscr, top + idx, left + 2, line[: box_width - 4])
-
-    stdscr.refresh()
-
-
-def _resolve_headless_model_list_command(config: Config, agent: str) -> str | None:
-    return config.headless_model_list_commands.get(agent) or config.headless_model_list_commands.get("*")
-
-
-def _show_model_list(
-    stdscr: curses._CursesWindow,
-    agent: str,
-    models: list[str],
-    list_command: str | None,
-) -> None:
-    lines: list[str] = []
-    if models:
-        lines.append("Configured models:")
-        lines.extend(models)
-
-    cli_models: list[str] = []
-    if list_command:
-        cli_models = _fetch_models_from_cli(list_command, agent)
-        if cli_models:
-            if lines:
-                lines.append("")
-            lines.append("CLI models:")
-            lines.extend(cli_models)
-
-    if not lines:
-        lines = ["No models configured.", "Set headless_models or list command in config."]
-    else:
-        lines.append("")
-        lines.append("Enter=close  Esc=close")
-
-    _confirm_dialog(stdscr, title="Available models", lines=lines)
-
-
-def _fetch_models_from_cli(command: str, agent: str) -> list[str]:
-    if not command.strip():
-        return []
-
-    try:
-        args = shlex.split(command)
-    except ValueError:
-        return []
-    if not args:
-        return []
-    if not shutil.which(args[0]):
-        return []
-
-    try:
-        result = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=4,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    if result.returncode != 0:
-        return []
-
-    lines: list[str] = []
-    for raw_line in result.stdout.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        line = re.sub(r"^[*\\-•]+\\s*", "", line)
-        if line and line not in lines:
-            lines.append(line)
-        if len(lines) >= 30:
-            break
-    return lines
 
 
 def _build_headless_session_name(agent: str, project: str, existing_names: set[str]) -> str:
@@ -1196,642 +630,6 @@ def _unique_session_name(base: str, existing_names: set[str]) -> str:
     return candidate
 
 
-def _view_headless_session(
-    stdscr: curses._CursesWindow,
-    session_name: str,
-    tmux: TmuxManager,
-    headless_registry: HeadlessRegistry,
-    config: Config,
-    logger: Logger,
-) -> None:
-    session = headless_registry.get(session_name)
-    if session is None:
-        _show_message(stdscr, f"Headless metadata not found for {session_name}")
-        return
-
-    tailer = HeadlessLogTail(session.output_path, config.headless_max_events)
-    output_lines: list[str] = []
-    last_refresh = 0.0
-    base_refresh = max(1, config.headless_refresh_seconds)
-    refresh_interval = base_refresh
-    max_refresh = max(base_refresh, base_refresh * 2)
-    runtime_status = None
-    waiting_input = False
-    show_full_prompt = True
-    show_raw_output = False
-    last_event_seen_at: float | None = None
-
-    while True:
-        now = time.monotonic()
-        if (now - last_refresh) >= refresh_interval:
-            output_lines = tailer.poll()
-            runtime_status = tmux.get_session_runtime_status(session_name)
-            waiting_input = _is_waiting_input(
-                runtime_status,
-                tailer,
-                config.headless_waiting_seconds,
-                now,
-            )
-            if runtime_status and not getattr(runtime_status, "running", False):
-                updated = _sync_headless_completion(
-                    headless_registry,
-                    logger,
-                    {session_name: session},
-                    {session_name: runtime_status},
-                    config.headless_notify_on_complete,
-                )
-                session = updated.get(session_name, session)
-
-            if tailer.last_event_at and tailer.last_event_at != last_event_seen_at:
-                last_event_seen_at = tailer.last_event_at
-                refresh_interval = base_refresh
-            else:
-                idle_for = now - (tailer.last_event_at or tailer.started_at)
-                if idle_for >= base_refresh * 2:
-                    refresh_interval = min(max_refresh, refresh_interval + base_refresh)
-            last_refresh = now
-
-        status_line = _format_headless_status_line(
-            session,
-            runtime_status,
-            waiting_input,
-            refresh_interval,
-        )
-        display_lines = tailer.raw_lines() if show_raw_output else output_lines
-        output_label = "raw JSON" if show_raw_output else "parsed"
-        _render_headless_view(
-            stdscr,
-            session,
-            display_lines,
-            status_line,
-            show_full_prompt,
-            output_label,
-        )
-
-        stdscr.timeout(200)
-        key = stdscr.getch()
-        if key in (ord("q"), 27):
-            return
-        if key == ord("r"):
-            last_refresh = 0.0
-            logger.info("headless_view", "manual refresh", session_name)
-        if key == ord("p"):
-            show_full_prompt = not show_full_prompt
-        if key == ord("o"):
-            show_raw_output = not show_raw_output
-        if key == ord("a"):
-            _attach_from_headless_view(stdscr, tmux, session_name, logger, config)
-            last_refresh = 0.0
-        if key == ord("i"):
-            _send_headless_input(stdscr, tmux, session_name, logger)
-            last_refresh = 0.0
-        if key == ord("k"):
-            confirm = _confirm_dialog(
-                stdscr,
-                title="Kill headless session",
-                lines=[
-                    f"Session: {session_name}",
-                    "This will terminate running processes.",
-                    "Enter=confirm  Esc=cancel",
-                ],
-            )
-            if confirm:
-                try:
-                    tmux.kill_session(session_name)
-                    headless_registry.forget(session_name)
-                    logger.info("headless_kill", "session killed", session_name)
-                except TmuxError as exc:
-                    logger.error("headless_kill", str(exc), session_name)
-                return
-
-
-def _normalize_stream_line(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped:
-        return None
-    if stripped.startswith("event:"):
-        return None
-    if stripped.startswith("data:"):
-        stripped = stripped[5:].strip()
-        if not stripped:
-            return None
-    return stripped
-
-
-def _looks_like_json(line: str) -> bool:
-    return line.lstrip().startswith(("{", "["))
-
-
-class HeadlessLogTail:
-    MAX_JSON_BUFFER = 20000
-
-    def __init__(self, output_path: str, max_events: int) -> None:
-        self.path = Path(output_path)
-        self.max_events = max_events
-        self.offset = 0
-        self.buffer = ""
-        self.json_buffer = ""
-        self.decoder = json.JSONDecoder()
-        self.events: deque[list[str]] = deque(maxlen=max_events)
-        self.raw_events: deque[list[str]] = deque(maxlen=max_events)
-        self.started_at = time.monotonic()
-        self.last_event_at: float | None = None
-
-    def poll(self) -> list[str]:
-        if not self.path.exists():
-            return ["(waiting for output)"]
-        try:
-            size = self.path.stat().st_size
-        except OSError:
-            return ["(failed to read output)"]
-
-        if size < self.offset:
-            self.offset = 0
-            self.buffer = ""
-            self.events.clear()
-            self.raw_events.clear()
-
-        try:
-            with self.path.open("r", encoding="utf-8", errors="replace") as handle:
-                handle.seek(self.offset)
-                data = handle.read()
-                if not data:
-                    return self._flatten_events()
-                self.offset = handle.tell()
-        except OSError:
-            return ["(failed to read output)"]
-
-        self.buffer += data
-        lines = self.buffer.split("\n")
-        if self.buffer and not self.buffer.endswith("\n"):
-            self.buffer = lines.pop()
-        else:
-            self.buffer = ""
-
-        for line in lines:
-            normalized = _normalize_stream_line(line)
-            if normalized is None:
-                continue
-            self._ingest_line(normalized)
-
-        return self._flatten_events()
-
-    def _flatten_events(self) -> list[str]:
-        if not self.events:
-            return ["(waiting for output)"]
-        output_lines: list[str] = []
-        for event_lines in self.events:
-            output_lines.extend(event_lines)
-        return output_lines
-
-    def _ingest_line(self, line: str) -> None:
-        if line in {"[DONE]", "DONE"}:
-            self._append_event({"type": "done", "message": "completed"}, raw_text=line)
-            return
-
-        if self.json_buffer:
-            candidate = f"{self.json_buffer}\n{line}"
-            remaining = self._drain_json_buffer(candidate)
-            if remaining is None:
-                self.json_buffer = candidate
-                self._trim_json_buffer()
-            else:
-                self.json_buffer = remaining
-            return
-
-        if _looks_like_json(line):
-            remaining = self._drain_json_buffer(line)
-            if remaining is None:
-                self.json_buffer = line
-                self._trim_json_buffer()
-            else:
-                self.json_buffer = remaining
-            return
-
-        self._append_raw(line)
-
-    def raw_lines(self) -> list[str]:
-        if not self.raw_events:
-            return ["(waiting for output)"]
-        output_lines: list[str] = []
-        for event_lines in self.raw_events:
-            output_lines.extend(event_lines)
-        return output_lines
-
-    def _append_event(self, payload: Any, raw_text: str | None = None) -> None:
-        self.events.append(_summarize_headless_event(payload))
-        if raw_text is None:
-            try:
-                raw_text = json.dumps(payload, ensure_ascii=True)
-            except (TypeError, ValueError):
-                raw_text = str(payload)
-        self.raw_events.append([raw_text])
-        self.last_event_at = time.monotonic()
-
-    def _append_raw(self, line: str) -> None:
-        self.events.append([f"raw: {line}"])
-        self.raw_events.append([line])
-        self.last_event_at = time.monotonic()
-
-    def _drain_json_buffer(self, buffer: str) -> str | None:
-        data = buffer.lstrip()
-        if not data:
-            return ""
-        parsed_any = False
-        while data:
-            try:
-                payload, index = self.decoder.raw_decode(data)
-            except json.JSONDecodeError:
-                return None if not parsed_any else data
-            parsed_any = True
-            self._append_event(payload)
-            data = data[index:].lstrip()
-        return data
-
-    def _trim_json_buffer(self) -> None:
-        if len(self.json_buffer) > self.MAX_JSON_BUFFER:
-            self._append_raw(self.json_buffer)
-            self.json_buffer = ""
-
-
-def _render_headless_view(
-    stdscr: curses._CursesWindow,
-    session: HeadlessSession,
-    output_lines: list[str],
-    status_line: str,
-    show_full_prompt: bool,
-    output_label: str,
-) -> None:
-    stdscr.erase()
-    _ensure_headless_colors()
-    height, width = stdscr.getmaxyx()
-    left = 2
-    max_width = max(1, width - left - 1)
-
-    row = 1
-    model_suffix = f":{session.model}" if session.model else ""
-    title = f"Headless Session: {session.session_name} [{session.agent}{model_suffix}]"
-    _safe_addstr(stdscr, row, left, title[:max_width])
-    row += 2
-
-    _safe_addstr(stdscr, row, left, f"Path: {session.workdir}"[:max_width])
-    row += 1
-
-    model = session.model or "default"
-    flow = session.flow or "-"
-    _safe_addstr(stdscr, row, left, f"Model: {model}  Flow: {flow}"[:max_width])
-    row += 1
-
-    _safe_addstr(stdscr, row, left, "📝 Prompt summary:"[:max_width])
-    row += 1
-    row = _render_bullets(
-        stdscr,
-        row,
-        left,
-        max_width,
-        _summarize_prompt(session.instruction or ""),
-        height - 4,
-    )
-
-    if session.last_raw_line and row < height - 6:
-        row += 1
-        _safe_addstr(stdscr, row, left, "🧾 Last raw line:"[:max_width])
-        row += 1
-        for line in _wrap_lines(session.last_raw_line, max_width):
-            if row >= height - 6:
-                break
-            _safe_addstr(stdscr, row, left, line[:max_width])
-            row += 1
-
-    if show_full_prompt and row < height - 6:
-        row += 1
-        _safe_addstr(stdscr, row, left, "📄 Full prompt:"[:max_width])
-        row += 1
-        full_prompt = session.instruction or "(empty)"
-        for line in _wrap_lines(full_prompt, max_width):
-            if row >= height - 6:
-                break
-            _safe_addstr(stdscr, row, left, line[:max_width])
-            row += 1
-
-    if row < height - 4:
-        row += 1
-
-    _safe_addstr(stdscr, row, left, f"Output ({output_label}):"[:max_width])
-    row += 1
-
-    available = max(0, height - row - 2)
-    wrapped_output: list[str] = []
-    for line in output_lines:
-        wrapped_output.extend(_wrap_lines(line, max_width))
-    if not wrapped_output:
-        wrapped_output = ["(waiting for output)"]
-    for line in wrapped_output[-available:]:
-        attr = 0
-        if output_label == "parsed":
-            attr = _headless_event_attr(line)
-        _safe_addstr(stdscr, row, left, line[:max_width], attr)
-        row += 1
-
-    footer = "q/Esc back  r refresh  p prompt  o output  a attach  i input  k kill"
-    _safe_addstr(stdscr, height - 2, left, footer[:max_width])
-    _safe_addstr(stdscr, height - 1, left, status_line[:max_width])
-    stdscr.refresh()
-
-
-def _format_headless_status_line(
-    session: HeadlessSession,
-    runtime_status: object,
-    waiting_input: bool,
-    refresh_interval: int,
-) -> str:
-    output_name = Path(session.output_path).name
-    status_text = "unknown"
-    exit_code = None
-    if runtime_status:
-        exists = getattr(runtime_status, "exists", False)
-        running = getattr(runtime_status, "running", False)
-        exit_code = getattr(runtime_status, "exit_code", None)
-        if not exists:
-            status_text = "missing"
-        elif running:
-            status_text = "waiting input" if waiting_input else "running"
-        else:
-            status_text = "completed"
-
-    if status_text == "completed" and exit_code is not None:
-        status_text = f"completed (exit {exit_code})"
-
-    return f"Status: {status_text}  Output: {output_name}  Refresh: {refresh_interval}s"
-
-
-def _is_waiting_input(
-    runtime_status: object,
-    tailer: HeadlessLogTail,
-    waiting_seconds: int,
-    now: float,
-) -> bool:
-    if waiting_seconds <= 0:
-        return False
-    if not runtime_status or not getattr(runtime_status, "running", False):
-        return False
-    last_event_at = tailer.last_event_at or tailer.started_at
-    return (now - last_event_at) >= waiting_seconds
-
-
-def _attach_from_headless_view(
-    stdscr: curses._CursesWindow,
-    tmux: TmuxManager,
-    session_name: str,
-    logger: Logger,
-    config: Config,
-) -> None:
-    _do_attach(
-        stdscr,
-        tmux,
-        session_name,
-        logger,
-        auto_rename_on_detach=False,
-    )
-    if config.auto_rename_on_detach:
-        logger.info("attach", "returned from headless session", session_name)
-
-
-def _send_headless_input(
-    stdscr: curses._CursesWindow,
-    tmux: TmuxManager,
-    session_name: str,
-    logger: Logger,
-) -> None:
-    value = _prompt_input_popup(
-        stdscr,
-        "Send input",
-        default="",
-        prompt="Input to send:",
-        max_len=200,
-    )
-    if value is None:
-        return
-    try:
-        tmux.send_keys(session_name, [value], enter=True)
-        logger.info("headless_input", "input sent", session_name)
-    except TmuxError as exc:
-        logger.error("headless_input", str(exc), session_name)
-        _show_message(stdscr, f"Send failed: {exc}")
-
-
-def _summarize_headless_event(payload: Any) -> list[str]:
-    if isinstance(payload, dict):
-        event_type = _stringify_event_value(payload.get("type") or payload.get("event") or payload.get("kind"))
-        message = _extract_event_message(payload)
-        if message:
-            lines = message.splitlines() or [message]
-        else:
-            try:
-                lines = [json.dumps(payload, ensure_ascii=True)]
-            except (TypeError, ValueError):
-                lines = [str(payload)]
-        if event_type:
-            emoji = _event_emoji(event_type)
-            label = f"{emoji} {event_type}" if emoji else event_type
-            lines[0] = f"{label}: {lines[0]}"
-        return lines
-    return [str(payload)]
-
-
-def _extract_event_message(payload: dict[str, Any]) -> str | None:
-    for key in ("message", "content", "text", "delta", "output", "data"):
-        candidate = _stringify_event_value(payload.get(key))
-        if candidate:
-            return candidate
-
-    choices = payload.get("choices")
-    if isinstance(choices, list):
-        for choice in choices:
-            if not isinstance(choice, dict):
-                continue
-            for path in (("delta", "content"), ("message", "content"), ("message",), ("delta",), ("text",)):
-                candidate = _stringify_event_path(choice, path)
-                if candidate:
-                    return candidate
-    return None
-
-
-def _stringify_event_path(payload: dict[str, Any], path: tuple[str, ...]) -> str | None:
-    current: Any = payload
-    for key in path:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return _stringify_event_value(current)
-
-
-def _stringify_event_value(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        parts = []
-        for item in value:
-            rendered = _stringify_event_value(item)
-            if rendered:
-                parts.append(rendered)
-        return " ".join(parts) if parts else None
-    if isinstance(value, dict):
-        for key in ("text", "content", "message"):
-            rendered = _stringify_event_value(value.get(key))
-            if rendered:
-                return rendered
-        try:
-            return json.dumps(value, ensure_ascii=True)
-        except (TypeError, ValueError):
-            return str(value)
-    try:
-        return str(value)
-    except Exception:
-        return None
-
-
-def _wrap_lines(text: str, width: int) -> list[str]:
-    if width <= 0:
-        return [text]
-    return textwrap.wrap(text, width=width) or [""]
-
-
-_HEADLESS_COLORS_READY = False
-
-
-def _ensure_headless_colors() -> None:
-    global _HEADLESS_COLORS_READY
-    if _HEADLESS_COLORS_READY:
-        return
-    if not curses.has_colors():
-        return
-    try:
-        curses.start_color()
-        curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
-        curses.init_pair(3, curses.COLOR_GREEN, -1)
-        curses.init_pair(4, curses.COLOR_YELLOW, -1)
-        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
-        curses.init_pair(6, curses.COLOR_RED, -1)
-        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
-        curses.init_pair(8, curses.COLOR_GREEN, curses.COLOR_BLACK)
-        curses.init_pair(9, curses.COLOR_BLUE, -1)
-        _HEADLESS_COLORS_READY = True
-    except curses.error:
-        return
-
-
-def _headless_event_attr(line: str) -> int:
-    if not curses.has_colors():
-        return 0
-    label = _extract_event_label(line)
-    if not label:
-        return 0
-    if label in {"thinking", "thought"}:
-        return curses.color_pair(1)
-    if label in {"tool", "tool_use", "tool_call"}:
-        return curses.color_pair(4)
-    if label in {"command", "cmd", "input"}:
-        return curses.color_pair(3)
-    if label in {"output", "text", "message", "content"}:
-        return curses.color_pair(8)
-    if label in {"error", "warning"}:
-        return curses.color_pair(6)
-    if label in {"system"}:
-        return curses.color_pair(9)
-    return 0
-
-
-def _extract_event_label(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped:
-        return None
-    if stripped.startswith("raw:"):
-        return "raw"
-    head = stripped.split(":", 1)[0].strip()
-    parts = head.split()
-    label = parts[-1] if parts else head
-    return label.lower() if label else None
-
-
-def _summarize_prompt(text: str, bullets: int = 3) -> list[str]:
-    normalized = " ".join(text.split())
-    if not normalized:
-        return ["(empty)"] + ["..."] * (bullets - 1)
-
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\\s+", normalized) if s.strip()]
-    if len(sentences) >= bullets:
-        return sentences[:bullets]
-
-    words = normalized.split()
-    total = len(words)
-    summary: list[str] = []
-    for idx in range(bullets):
-        start = round(idx * total / bullets)
-        end = round((idx + 1) * total / bullets)
-        chunk = " ".join(words[start:end]).strip()
-        summary.append(chunk or "...")
-    return summary
-
-
-def _render_bullets(
-    stdscr: curses._CursesWindow,
-    row: int,
-    left: int,
-    width: int,
-    bullets: list[str],
-    max_row: int,
-) -> int:
-    for bullet in bullets:
-        wrapped = _wrap_lines(bullet, max(1, width - 2))
-        for idx, line in enumerate(wrapped):
-            if row >= max_row:
-                return row
-            prefix = "- " if idx == 0 else "  "
-            _safe_addstr(stdscr, row, left, f"{prefix}{line}"[:width])
-            row += 1
-    return row
-
-
-def _event_emoji(event_type: str) -> str:
-    key = event_type.strip().lower()
-    mapping = {
-        "thinking": "🧠",
-        "thought": "🧠",
-        "tool": "🛠",
-        "tool_use": "🛠",
-        "tool_call": "🛠",
-        "command": "⌨️",
-        "cmd": "⌨️",
-        "input": "⌨️",
-        "output": "💬",
-        "text": "💬",
-        "message": "💬",
-        "content": "💬",
-        "error": "⚠️",
-        "warning": "⚠️",
-        "system": "📌",
-    }
-    return mapping.get(key, "")
-
-
-def _show_message(stdscr: curses._CursesWindow, message: str) -> None:
-    height, width = stdscr.getmaxyx()
-    stdscr.erase()
-    line = message[: max(0, width - 1)]
-    y = max(0, height // 2)
-    x = max(0, (width - len(line)) // 2)
-    _safe_addstr(stdscr, y, x, line)
-    _safe_addstr(stdscr, y + 1, x, "Press any key to return"[: max(0, width - x - 1)])
-    stdscr.refresh()
-    stdscr.timeout(-1)
-    stdscr.getch()
-
-
 FUNNY_NAMES = [
     "chaos-monkey", "coffee-otter", "hamster-wheel", "noodle-inc",
     "wizard-mode", "sneaky-panda", "turbo-snail", "quantum-unicorn",
@@ -1847,52 +645,3 @@ FUNNY_NAMES = [
 def _generate_funny_name() -> str:
     """Generate a random funny name for unnamed sessions."""
     return random.choice(FUNNY_NAMES)
-
-
-def _confirm_dialog(
-    stdscr: curses._CursesWindow,
-    title: str,
-    lines: list[str],
-) -> bool:
-    height, width = stdscr.getmaxyx()
-    content_width = max([len(title), *[len(line) for line in lines]])
-    box_width = min(width - 4, content_width + 4)
-    box_height = min(height - 2, len(lines) + 4)
-    top = max(1, (height - box_height) // 2)
-    left = max(1, (width - box_width) // 2)
-
-    for row in range(box_height):
-        _safe_addstr(stdscr, top + row, left, " " * box_width)
-
-    _safe_addstr(stdscr, top + 1, left + 2, title[: box_width - 4])
-    for idx, line in enumerate(lines, start=2):
-        if idx >= box_height - 1:
-            break
-        _safe_addstr(stdscr, top + idx, left + 2, line[: box_width - 4])
-
-    stdscr.refresh()
-
-    while True:
-        key = stdscr.getch()
-        if key in (10, 13):
-            return True
-        if key == 27:
-            return False
-
-
-def _safe_addstr(
-    stdscr: curses._CursesWindow,
-    y: int,
-    x: int,
-    text: str,
-    attr: int = 0,
-) -> None:
-    height, width = stdscr.getmaxyx()
-    if y < 0 or y >= height or x < 0 or x >= width:
-        return
-    if x + len(text) >= width:
-        text = text[: max(0, width - x - 1)]
-    try:
-        stdscr.addstr(y, x, text, attr)
-    except curses.error:
-        pass
