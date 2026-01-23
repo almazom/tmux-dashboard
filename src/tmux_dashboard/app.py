@@ -164,11 +164,25 @@ Environment Variables:
   TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH  Set to 0/false to preserve manual session names (default: true)
   TMUX_DASHBOARD_LOCK_FILE    Override lock file path (default: ~/.local/state/tmux-dashboard/lock)
   TMUX_DASHBOARD_PID_FILE     Override PID file path (default: ~/.local/state/tmux-dashboard/pid)
+  TMUX_DASHBOARD_HEADLESS_STATE_DIR     Headless metadata dir (default: ~/.local/state/tmux-dashboard/headless)
+  TMUX_DASHBOARD_HEADLESS_OUTPUT_DIR    Headless output dir (default: ~/.local/state/tmux-dashboard/headless/output)
+  TMUX_DASHBOARD_HEADLESS_REFRESH_SECONDS  Headless output refresh seconds (default: 5)
+  TMUX_DASHBOARD_HEADLESS_MAX_EVENTS    Headless output events to display (default: 200)
+  TMUX_DASHBOARD_HEADLESS_WAITING_SECONDS  Headless idle threshold seconds (default: 20)
+  TMUX_DASHBOARD_HEADLESS_DEFAULT_AGENT Default headless agent (default: codex)
+  TMUX_DASHBOARD_HEADLESS_CODEX_CMD     Override codex headless command template
+  TMUX_DASHBOARD_HEADLESS_CLADCODE_CMD  Override cladcode headless command template
+  TMUX_DASHBOARD_HEADLESS_MODELS        Comma-separated model list (applies to all agents)
+  TMUX_DASHBOARD_HEADLESS_DEFAULT_MODEL Default model (applies to all agents)
+  TMUX_DASHBOARD_HEADLESS_MODEL_LIST_COMMAND  CLI command to list models (applies to all agents)
+  TMUX_DASHBOARD_HEADLESS_AUTO_CLEANUP  Auto-clean completed headless sessions (default: false)
+  TMUX_DASHBOARD_HEADLESS_NOTIFY_ON_COMPLETE  Send t2me on completion (default: false)
 
 Keybindings in Dashboard:
   Up/Down      Navigate sessions
-  Enter        Attach to session
+  Enter        Attach/view session
   n            Create new session
+  H            Create headless session
   d            Delete session
   R            Rename session
   r            Refresh list

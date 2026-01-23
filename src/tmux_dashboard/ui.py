@@ -120,7 +120,7 @@ class DashboardUI:
     def _draw_sessions(self, state: UiState, top: int, height: int, width: int, left: int) -> None:
         sessions = state.sessions
         if not sessions:
-            self._addstr(top, left, "No sessions found. Press 'n' to create one.")
+            self._addstr(top, left, "No sessions found. Press 'n' to create one or 'H' for headless.")
             return
 
         headless_start = state.headless_start_index
@@ -155,7 +155,11 @@ class DashboardUI:
                 status = "attached" if session.attached else "detached"
                 if session.is_headless:
                     agent = session.headless_agent or "headless"
-                    label = f"{num_prefix}{name:<18} [headless:{agent}]"
+                    model = session.headless_model
+                    suffix = f"{agent}/{model}" if model else agent
+                    status_icon = _headless_status_icon(session.headless_status)
+                    status_label = f"{status_icon} " if status_icon else ""
+                    label = f"{num_prefix}{status_label}{name:<16} [headless:{suffix}]"
                 else:
                     windows = f"windows: {session.windows}"
                     label = f"{num_prefix}{name:<18} [{status:<8}] {windows}"
@@ -273,3 +277,13 @@ class DashboardUI:
             self.stdscr.addstr(y, x, text, attr)
         except curses.error:
             pass
+
+
+def _headless_status_icon(status: str | None) -> str:
+    if status == "completed":
+        return "✅"
+    if status == "running":
+        return "⏳"
+    if status == "missing":
+        return "⚠️"
+    return ""
