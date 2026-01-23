@@ -8,10 +8,16 @@ from tmux_dashboard.headless_state import (
     read_last_raw_line,
     sync_headless_completion,
 )
-from tmux_dashboard.headless_view import HeadlessLogTail, is_waiting_input
+from tmux_dashboard.headless_view import (
+    HeadlessLogTail,
+    format_headless_status_line,
+    is_waiting_input,
+    summarize_headless_event,
+)
 from tmux_dashboard.input_handler import _delete_session
 from tmux_dashboard.models import SessionInfo
 from tmux_dashboard.tmux_manager import SessionRuntimeStatus, TmuxManager
+from tmux_dashboard.ui import DashboardUI, UiState
 
 
 def test_load_config_headless_models(tmp_path, monkeypatch):
@@ -134,6 +140,34 @@ def test_headless_log_tail_resets_on_truncate(tmp_path):
     assert any("output: x" in line for line in output_lines)
 
 
+def test_headless_log_tail_resets_timestamps_on_truncate(tmp_path):
+    output_path = tmp_path / "output.jsonl"
+    tailer = HeadlessLogTail(str(output_path), max_events=5)
+
+    line_one = json.dumps({"type": "output", "content": "first"})
+    output_path.write_text(f"{line_one}\n", encoding="utf-8")
+    tailer.poll()
+    initial_started = tailer.started_at
+    assert tailer.last_event_at is not None
+
+    output_path.write_text("", encoding="utf-8")
+    tailer.poll()
+
+    assert tailer.last_event_at is None
+    assert tailer.started_at >= initial_started
+
+
+def test_headless_log_tail_large_json_falls_back_to_raw(tmp_path):
+    output_path = tmp_path / "output.jsonl"
+    tailer = HeadlessLogTail(str(output_path), max_events=5)
+
+    oversized = "{" + ("a" * (HeadlessLogTail.MAX_JSON_BUFFER + 100))
+    output_path.write_text(f"{oversized}\n", encoding="utf-8")
+
+    output_lines = tailer.poll()
+    assert any(line.startswith("raw: {") for line in output_lines)
+
+
 def test_waiting_input_detection(tmp_path):
     output_path = tmp_path / "output.jsonl"
     tailer = HeadlessLogTail(str(output_path), max_events=5)
@@ -214,6 +248,41 @@ def test_sync_headless_completion_updates(tmp_path, monkeypatch):
     assert completed.completed_at is not None
     assert completed.exit_code == 3
     assert completed.last_raw_line == "last line"
+
+
+def test_format_headless_status_line_missing(tmp_path):
+    session = build_headless_session(
+        session_name="headless-missing",
+        agent="codex",
+        model="gpt-5.2-codex medium",
+        instruction="test",
+        workdir=str(tmp_path),
+        output_path=str(tmp_path / "out" / "headless-missing.jsonl"),
+    )
+    status = SessionRuntimeStatus(exists=False, running=False, exit_code=None)
+    line = format_headless_status_line(session, status, waiting_input=False, refresh_interval=5)
+    assert "missing" in line
+    assert "headless-missing.jsonl" in line
+
+
+def test_format_headless_status_line_completed_exit(tmp_path):
+    session = build_headless_session(
+        session_name="headless-done",
+        agent="codex",
+        model=None,
+        instruction="test",
+        workdir=str(tmp_path),
+        output_path=str(tmp_path / "out" / "headless-done.jsonl"),
+    )
+    status = SessionRuntimeStatus(exists=True, running=False, exit_code=2)
+    line = format_headless_status_line(session, status, waiting_input=False, refresh_interval=5)
+    assert "completed" in line
+    assert "exit 2" in line
+
+
+def test_summarize_headless_event_prefers_message():
+    line = summarize_headless_event({"type": "tool", "message": "hello"})[0]
+    assert "tool: hello" in line
 
 
 def test_apply_headless_metadata_includes_metadata_only(tmp_path):
@@ -350,6 +419,97 @@ def test_headless_registry_update_uses_base_on_corrupt(tmp_path):
     assert data["workdir"] == session.workdir
     assert data["output_path"] == session.output_path
     assert data["exit_code"] == 7
+
+
+def test_auto_cleanup_headless_skips_running(tmp_path, monkeypatch):
+    registry = HeadlessRegistry(tmp_path / "meta", tmp_path / "out")
+    session = build_headless_session(
+        session_name="headless-running",
+        agent="codex",
+        model="gpt-5.2-codex medium",
+        instruction="test",
+        workdir=str(tmp_path),
+        output_path=str(tmp_path / "out" / "headless-running.jsonl"),
+    )
+    registry.record(session)
+    headless_map = registry.load_all()
+
+    manager = TmuxManager()
+
+    def fake_status(_name):
+        return SessionRuntimeStatus(exists=True, running=True, exit_code=None)
+
+    def fake_kill(_name):
+        raise AssertionError("kill_session should not be called for running")
+
+    monkeypatch.setattr(manager, "get_session_runtime_status", fake_status)
+    monkeypatch.setattr(manager, "kill_session", fake_kill)
+
+    cleaned = auto_cleanup_headless(
+        manager,
+        registry,
+        logger=_NullLogger(),
+        headless_map=headless_map,
+        status_map={"headless-running": SessionRuntimeStatus(exists=True, running=True, exit_code=None)},
+    )
+    assert "headless-running" in cleaned
+
+
+def test_headless_registry_update_fills_missing_fields(tmp_path):
+    registry = HeadlessRegistry(tmp_path / "meta", tmp_path / "out")
+    session = build_headless_session(
+        session_name="headless-fill",
+        agent="codex",
+        model="gpt-5.2-codex medium",
+        instruction="test",
+        workdir=str(tmp_path),
+        output_path=str(tmp_path / "out" / "headless-fill.jsonl"),
+    )
+    path = registry.metadata_path(session.session_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"session_name": session.session_name}), encoding="utf-8")
+
+    ok = registry.update(session.session_name, {"exit_code": 4}, base=session)
+
+    assert ok is True
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["agent"] == session.agent
+    assert data["workdir"] == session.workdir
+    assert data["output_path"] == session.output_path
+
+
+def test_dashboard_renders_empty_state():
+    class _Screen:
+        def __init__(self):
+            self._lines = []
+            self._height = 30
+            self._width = 120
+
+        def erase(self):
+            return None
+
+        def getmaxyx(self):
+            return self._height, self._width
+
+        def addstr(self, *_args, **_kwargs):
+            return None
+
+        def refresh(self):
+            return None
+
+    screen = _Screen()
+    ui = DashboardUI(screen, color_mode="never")
+    state = UiState(
+        sessions=[],
+        selected_index=0,
+        filter_text="",
+        in_search=False,
+        help_visible=False,
+        status=None,
+        preview=None,
+    )
+
+    ui.render(state, preview_lines=5)
 
 
 class _NullLogger:
