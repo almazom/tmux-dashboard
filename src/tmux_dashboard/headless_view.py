@@ -339,6 +339,8 @@ class HeadlessLogTail:
             self.buffer = ""
             self.events.clear()
             self.raw_events.clear()
+            self.started_at = time.monotonic()
+            self.last_event_at = None
 
         try:
             with self.path.open("r", encoding="utf-8", errors="replace") as handle:
