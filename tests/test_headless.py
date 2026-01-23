@@ -2,15 +2,14 @@ import json
 
 from tmux_dashboard.config import load_config
 from tmux_dashboard.headless import HeadlessRegistry, build_headless_session
-from tmux_dashboard.input_handler import (
-    HeadlessLogTail,
-    _apply_headless_metadata,
-    _auto_cleanup_headless,
-    _delete_session,
-    _is_waiting_input,
-    _read_last_raw_line,
-    _sync_headless_completion,
+from tmux_dashboard.headless_state import (
+    apply_headless_metadata,
+    auto_cleanup_headless,
+    read_last_raw_line,
+    sync_headless_completion,
 )
+from tmux_dashboard.headless_view import HeadlessLogTail, is_waiting_input
+from tmux_dashboard.input_handler import _delete_session
 from tmux_dashboard.models import SessionInfo
 from tmux_dashboard.tmux_manager import SessionRuntimeStatus, TmuxManager
 
@@ -141,10 +140,10 @@ def test_waiting_input_detection(tmp_path):
 
     status = SessionRuntimeStatus(exists=True, running=True, exit_code=None)
     now = tailer.started_at + 25
-    assert _is_waiting_input(status, tailer, waiting_seconds=20, now=now)
+    assert is_waiting_input(status, tailer, waiting_seconds=20, now=now)
 
     tailer.last_event_at = now
-    assert not _is_waiting_input(status, tailer, waiting_seconds=20, now=now + 5)
+    assert not is_waiting_input(status, tailer, waiting_seconds=20, now=now + 5)
 
 
 def test_auto_cleanup_headless(tmp_path, monkeypatch):
@@ -171,7 +170,7 @@ def test_auto_cleanup_headless(tmp_path, monkeypatch):
     monkeypatch.setattr(manager, "get_session_runtime_status", fake_status)
     monkeypatch.setattr(manager, "kill_session", fake_kill)
 
-    cleaned = _auto_cleanup_headless(
+    cleaned = auto_cleanup_headless(
         manager,
         registry,
         logger=_NullLogger(),
@@ -184,7 +183,7 @@ def test_auto_cleanup_headless(tmp_path, monkeypatch):
 def test_read_last_raw_line(tmp_path):
     path = tmp_path / "output.jsonl"
     path.write_text("one\n\ntwo\n", encoding="utf-8")
-    assert _read_last_raw_line(str(path)) == "two"
+    assert read_last_raw_line(str(path)) == "two"
 
 
 def test_sync_headless_completion_updates(tmp_path, monkeypatch):
@@ -204,7 +203,7 @@ def test_sync_headless_completion_updates(tmp_path, monkeypatch):
     headless_map = registry.load_all()
     status_map = {"headless-test": SessionRuntimeStatus(exists=True, running=False, exit_code=3)}
 
-    updated = _sync_headless_completion(
+    updated = sync_headless_completion(
         registry,
         logger=_NullLogger(),
         headless_map=headless_map,
@@ -231,7 +230,7 @@ def test_apply_headless_metadata_includes_metadata_only(tmp_path):
         session.session_name: SessionRuntimeStatus(exists=False, running=False, exit_code=None)
     }
 
-    result = _apply_headless_metadata([], headless_map, status_map)
+    result = apply_headless_metadata([], headless_map, status_map)
 
     assert len(result) == 1
     entry = result[0]
@@ -257,7 +256,7 @@ def test_apply_headless_metadata_does_not_duplicate_sessions(tmp_path):
         headless_session.session_name: SessionRuntimeStatus(exists=True, running=True, exit_code=None)
     }
 
-    result = _apply_headless_metadata(sessions, headless_map, status_map)
+    result = apply_headless_metadata(sessions, headless_map, status_map)
 
     assert len(result) == 1
     assert result[0].is_headless
