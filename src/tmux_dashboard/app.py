@@ -109,11 +109,15 @@ def _resolve_conflict_action(lock_info: dict[str, str | None]) -> str:
 def _terminate_lock_holder(lock_info: dict[str, str | None], logger: Logger) -> bool:
     pid_value = lock_info.get("locking_pid")
     if not pid_value or not pid_value.isdigit():
+        lock = InstanceLock()
+        if not lock.is_locked():
+            _cleanup_stale_lock_files(lock, logger)
+            return True
         logger.warn("lock_takeover", "no valid pid to terminate")
         return False
     pid = int(pid_value)
     args = _pid_args(pid)
-    if not args or "tmux-dashboard" not in args:
+    if not args or ("tmux-dashboard" not in args and "tmux_dashboard" not in args):
         logger.warn("lock_takeover", f"pid {pid} does not look like tmux-dashboard")
         return False
     try:
@@ -130,6 +134,15 @@ def _terminate_lock_holder(lock_info: dict[str, str | None], logger: Logger) -> 
         time.sleep(0.1)
     logger.warn("lock_takeover", "lock still held after termination attempt")
     return False
+
+
+def _cleanup_stale_lock_files(lock: InstanceLock, logger: Logger) -> None:
+    for path in (lock.lock_file, lock.pid_file):
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError as exc:
+            logger.warn("lock_cleanup", f"failed to remove {path}: {exc}")
 
 
 def _handle_lock_conflict(
@@ -283,7 +296,7 @@ Environment Variables:
   TMUX_DASHBOARD_HEADLESS_WAITING_SECONDS  Headless idle threshold seconds (default: 20)
   TMUX_DASHBOARD_HEADLESS_DEFAULT_AGENT Default headless agent (default: codex)
   TMUX_DASHBOARD_HEADLESS_CODEX_CMD     Override codex headless command template
-  TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON  Force codex stream-json output (default: true)
+  TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON  Force codex JSONL output (default: true)
   TMUX_DASHBOARD_HEADLESS_CLADCODE_CMD  Override cladcode headless command template
   TMUX_DASHBOARD_HEADLESS_MODELS        Comma-separated model list (applies to all agents)
   TMUX_DASHBOARD_HEADLESS_DEFAULT_MODEL Default model (applies to all agents)

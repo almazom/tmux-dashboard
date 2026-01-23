@@ -3,6 +3,12 @@
 
 set -eo pipefail
 
+FORCE_DASHBOARD=0
+if [[ "${1:-}" == "--force" || "${1:-}" == "-f" ]]; then
+    FORCE_DASHBOARD=1
+    shift
+fi
+
 resolve_repo_root() {
     if [[ -n "${TMUX_DASHBOARD_ROOT:-}" ]]; then
         echo "$TMUX_DASHBOARD_ROOT"
@@ -53,6 +59,7 @@ ${YELLOW}COMMANDS:${NC}
 ${YELLOW}OPTIONS:${NC}
     -h, --help      Show this help message
     -v, --version   Show version info
+    -f, --force     Kill tmux-dashboard instance + remove lock, then start dashboard
 
 ${YELLOW}EXAMPLES:${NC}
     tm                  Launch dashboard
@@ -67,6 +74,26 @@ ${YELLOW}TMUX SHORTCUTS (when inside tmux):${NC}
     Ctrl+B, S          List sessions
     Ctrl+B, $          Rename session
 EOF
+}
+
+cleanup_dashboard_lock() {
+    local lock_file pid_file pid cmd
+    lock_file="${TMUX_DASHBOARD_LOCK_FILE:-$HOME/.local/state/tmux-dashboard/lock}"
+    pid_file="${TMUX_DASHBOARD_PID_FILE:-$HOME/.local/state/tmux-dashboard/pid}"
+    pid=""
+    if [[ -s "$lock_file" ]]; then
+        pid="$(cat "$lock_file" 2>/dev/null || true)"
+    elif [[ -s "$pid_file" ]]; then
+        pid="$(cat "$pid_file" 2>/dev/null || true)"
+    fi
+    if [[ "$pid" =~ ^[0-9]+$ ]]; then
+        cmd="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+    if [[ "$cmd" == *"tmux-dashboard"* || "$cmd" == *"tmux_dashboard"* ]]; then
+        kill "$pid" 2>/dev/null || true
+        sleep 0.1
+    fi
+    fi
+    rm -f "$lock_file" "$pid_file"
 }
 
 list_sessions() {
@@ -149,6 +176,22 @@ case "${1:-}" in
         rename_session "$2" "$3"
         ;;
     dashboard|d|"")
+        # Always open dashboard UI; avoid auto-attach to a tmux session.
+        export TMUX_DASHBOARD_AUTO_CREATE="${TMUX_DASHBOARD_AUTO_CREATE:-0}"
+        export TMUX_DASHBOARD_CONFLICT_ACTION="${TMUX_DASHBOARD_CONFLICT_ACTION:-takeover}"
+        export TMUX_DASHBOARD_ATTACH_MODE="${TMUX_DASHBOARD_ATTACH_MODE:-nested}"
+        if [[ "$FORCE_DASHBOARD" -eq 1 ]]; then
+            cleanup_dashboard_lock
+        fi
+
+        if [[ -z "${TMUX_DASHBOARD_ROOT:-}" && -d "/home/almaz/zoo/tmux_dahsboard/src/tmux_dashboard" ]]; then
+            export TMUX_DASHBOARD_ROOT="/home/almaz/zoo/tmux_dahsboard"
+        fi
+
+        if [[ -n "${TMUX_DASHBOARD_ROOT:-}" && -d "${TMUX_DASHBOARD_ROOT}/src/tmux_dashboard" ]]; then
+            PYTHONPATH="${TMUX_DASHBOARD_ROOT}/src${PYTHONPATH:+:$PYTHONPATH}" python3 -m tmux_dashboard
+            exit 0
+        fi
         if command -v tmux-dashboard >/dev/null 2>&1; then
             tmux-dashboard
             exit 0
