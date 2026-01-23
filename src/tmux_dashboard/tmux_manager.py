@@ -40,6 +40,13 @@ class SessionDetails:
     windows: list[WindowInfo]
 
 
+@dataclass(frozen=True)
+class SessionRuntimeStatus:
+    exists: bool
+    running: bool
+    exit_code: int | None = None
+
+
 class TmuxManager:
     def __init__(self) -> None:
         self._libtmux = libtmux
@@ -476,6 +483,16 @@ class TmuxManager:
             raise TmuxError(result.stderr.strip() or "tmux rename-session failed")
         self._rename_window(new_name, new_name)
 
+    def send_keys(self, session_name: str, keys: list[str], enter: bool = True) -> None:
+        if not keys and not enter:
+            return
+        command = ["tmux", "send-keys", "-t", f"{session_name}:0", *keys]
+        if enter:
+            command.append("Enter")
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise TmuxError(result.stderr.strip() or "tmux send-keys failed")
+
     def get_session_details(self, name: str) -> SessionDetails | None:
         if not self._libtmux:
             return None
@@ -525,6 +542,39 @@ class TmuxManager:
         except (subprocess.TimeoutExpired, FileNotFoundError):
             pass
         return None
+
+    def get_session_runtime_status(self, session_name: str) -> SessionRuntimeStatus:
+        """Check whether a tmux session is still running or completed."""
+        try:
+            result = subprocess.run(
+                ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_dead}::#{pane_exit_status}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            return SessionRuntimeStatus(exists=False, running=False)
+
+        if result.returncode != 0:
+            if "can't find session" in result.stderr.lower():
+                return SessionRuntimeStatus(exists=False, running=False)
+            return SessionRuntimeStatus(exists=True, running=False)
+
+        lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        if not lines:
+            return SessionRuntimeStatus(exists=True, running=False)
+
+        running = False
+        exit_codes: list[int] = []
+        for line in lines:
+            dead_str, exit_str = (line.split("::", 1) + ["", ""])[:2]
+            if dead_str.strip() == "0":
+                running = True
+            if exit_str.strip().isdigit():
+                exit_codes.append(int(exit_str.strip()))
+
+        exit_code = max(exit_codes) if exit_codes else None
+        return SessionRuntimeStatus(exists=True, running=running, exit_code=exit_code)
 
     @staticmethod
     def _normalize_attached(value: object) -> bool:
