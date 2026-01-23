@@ -434,6 +434,10 @@ class TmuxManager:
         # Check if already inside tmux
         tmux_env = os.environ.get("TMUX")
         if tmux_env:
+            mode = os.environ.get("TMUX_DASHBOARD_ATTACH_MODE", "").strip().lower()
+            if mode in {"nested", "nest"}:
+                # Force a nested client so detach returns to the dashboard pane.
+                return ["env", "-u", "TMUX", "tmux", "attach-session", "-t", name]
             # Already inside tmux - use switch-client
             return ["tmux", "switch-client", "-t", name]
         # Not inside tmux - use attach-session
