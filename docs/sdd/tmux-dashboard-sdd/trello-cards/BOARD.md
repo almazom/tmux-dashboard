@@ -38,15 +38,21 @@
 
 | Card | Title | SP | Depends On | Status |
 |------|-------|----|-----------:|--------|
-| [01](./01-tmux-dashboard-scaffold.md) | Scaffold app + config/logging | 3 | - | TODO |
-| [02](./02-tmux-dashboard-tmux-manager.md) | Tmux manager core | 3 | 01 | TODO |
-| [03](./03-tmux-dashboard-ui-layout.md) | Curses dashboard layout | 3 | 02 | TODO |
-| [04](./04-tmux-dashboard-input-actions.md) | Input handling and core actions | 3 | 03 | TODO |
-| [05](./05-tmux-dashboard-search-help.md) | Search/filter and help | 3 | 04 | TODO |
-| [06](./06-tmux-dashboard-preview.md) | Session preview pane | 3 | 05 | TODO |
-| [07](./07-tmux-dashboard-delete.md) | Delete with confirmation | 2 | 06 | TODO |
-| [08](./08-tmux-dashboard-autostart.md) | zsh auto-start integration | 2 | 07 | TODO |
-| [09](./09-tmux-dashboard-manual-e2e.md) | Manual E2E and verification | 2 | 08 | TODO |
+| [01](./01-tmux-dashboard-scaffold.md) | Scaffold app + config/logging | 3 | - | DONE |
+| [02](./02-tmux-dashboard-tmux-manager.md) | Tmux manager core | 3 | 01 | DONE |
+| [03](./03-tmux-dashboard-ui-layout.md) | Curses dashboard layout | 3 | 02 | DONE |
+| [04](./04-tmux-dashboard-input-actions.md) | Input handling and core actions | 3 | 03 | DONE |
+| [05](./05-tmux-dashboard-search-help.md) | Search/filter and help | 3 | 04 | DONE |
+| [06](./06-tmux-dashboard-preview.md) | Session preview pane | 3 | 05 | DONE |
+| [07](./07-tmux-dashboard-delete.md) | Delete with confirmation | 2 | 06 | DONE |
+| [08](./08-tmux-dashboard-autostart.md) | zsh auto-start integration | 2 | 07 | DONE |
+| [09](./09-tmux-dashboard-manual-e2e.md) | Manual E2E and verification | 2 | 08 | DONE |
+
+## Feature Extensions
+
+| Feature | Description | Status |
+|---------|-------------|--------|
+| Headless Sessions | AI Agent session management (Metadata, UI, Logs) | DONE |
 
 ## Sprint Summary
 
