@@ -21,7 +21,14 @@ def do_attach(
     Returns:
         The new session name if it was renamed, otherwise the original name.
     """
-    curses.endwin()
+    try:
+        curses.def_prog_mode()
+    except curses.error as exc:
+        logger.warn("curses_suspend", f"failed to save mode: {exc}")
+    try:
+        curses.endwin()
+    except curses.error as exc:
+        logger.warn("curses_suspend", f"failed to end window: {exc}")
 
     try:
         logger.info("attach", f"attaching to {session_name}")
@@ -37,9 +44,19 @@ def do_attach(
             if new_name:
                 logger.info("rename", f"auto-renamed session from {session_name} to {new_name}")
 
-        curses.doupdate()
-        stdscr.clear()
-        stdscr.refresh()
+        try:
+            curses.reset_prog_mode()
+        except curses.error as exc:
+            logger.warn("curses_resume", f"failed to reset mode: {exc}")
+        try:
+            curses.doupdate()
+        except curses.error as exc:
+            logger.warn("curses_resume", f"failed to update screen: {exc}")
+        try:
+            stdscr.clear()
+            stdscr.refresh()
+        except curses.error as exc:
+            logger.warn("curses_resume", f"failed to refresh window: {exc}")
         try:
             curses.noecho()
             curses.cbreak()
@@ -48,6 +65,10 @@ def do_attach(
                 curses.curs_set(0)
             except curses.error:
                 pass
+        except curses.error as exc:
+            logger.warn("curses_resume", f"failed to restore tty modes: {exc}")
+        try:
+            curses.flushinp()
         except curses.error:
             pass
 
