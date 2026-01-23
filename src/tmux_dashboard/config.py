@@ -22,11 +22,25 @@ DEFAULT_HEADLESS_STATE_DIR = Path("~/.local/state/tmux-dashboard/headless").expa
 DEFAULT_HEADLESS_OUTPUT_DIR = Path("~/.local/state/tmux-dashboard/headless/output").expanduser()
 DEFAULT_HEADLESS_REFRESH_SECONDS = 5
 DEFAULT_HEADLESS_MAX_EVENTS = 200
+DEFAULT_HEADLESS_WAITING_SECONDS = 20
 DEFAULT_HEADLESS_DEFAULT_AGENT = "codex"
 DEFAULT_HEADLESS_AGENTS = {
-    "codex": "codex --headless --output {output} --prompt {instruction}",
-    "cladcode": "cladcode --headless --output {output} --prompt {instruction}",
+    "codex": "codex --model {model} --headless --prompt {instruction} 2>&1 | tee -a {output}",
+    "cladcode": "cladcode -p {instruction} --output-format stream-json --non-interactive 2>&1 | tee -a {output}",
 }
+DEFAULT_HEADLESS_MODELS: dict[str, list[str]] = {
+    "codex": [
+        "gpt-5.2-codex xhigh",
+        "gpt-5.2-codex high",
+        "gpt-5.2-codex medium",
+    ],
+}
+DEFAULT_HEADLESS_DEFAULT_MODELS: dict[str, str] = {
+    "codex": "gpt-5.2-codex medium",
+}
+DEFAULT_HEADLESS_MODEL_LIST_COMMANDS: dict[str, str] = {}
+DEFAULT_HEADLESS_AUTO_CLEANUP = False
+DEFAULT_HEADLESS_NOTIFY_ON_COMPLETE = False
 
 
 @dataclass
@@ -43,8 +57,16 @@ class Config:
     headless_output_dir: Path = field(default_factory=lambda: DEFAULT_HEADLESS_OUTPUT_DIR)
     headless_refresh_seconds: int = field(default_factory=lambda: DEFAULT_HEADLESS_REFRESH_SECONDS)
     headless_max_events: int = field(default_factory=lambda: DEFAULT_HEADLESS_MAX_EVENTS)
+    headless_waiting_seconds: int = field(default_factory=lambda: DEFAULT_HEADLESS_WAITING_SECONDS)
     headless_default_agent: str = field(default_factory=lambda: DEFAULT_HEADLESS_DEFAULT_AGENT)
     headless_agents: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_AGENTS))
+    headless_models: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_MODELS))
+    headless_default_models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_DEFAULT_MODELS))
+    headless_model_list_commands: dict[str, str] = field(
+        default_factory=lambda: dict(DEFAULT_HEADLESS_MODEL_LIST_COMMANDS)
+    )
+    headless_auto_cleanup: bool = field(default_factory=lambda: DEFAULT_HEADLESS_AUTO_CLEANUP)
+    headless_notify_on_complete: bool = field(default_factory=lambda: DEFAULT_HEADLESS_NOTIFY_ON_COMPLETE)
 
     def save_sort_mode(self, mode: SortMode) -> None:
         """Save sort mode to config file."""
@@ -146,6 +168,11 @@ def load_config(path: str | None = None) -> Config:
         DEFAULT_HEADLESS_MAX_EVENTS,
     )
 
+    headless_waiting_seconds = _safe_int(
+        os.environ.get("TMUX_DASHBOARD_HEADLESS_WAITING_SECONDS") or data.get("headless_waiting_seconds"),
+        DEFAULT_HEADLESS_WAITING_SECONDS,
+    )
+
     headless_agents = dict(DEFAULT_HEADLESS_AGENTS)
     agents_from_config = data.get("headless_agents")
     if isinstance(agents_from_config, dict):
@@ -175,6 +202,42 @@ def load_config(path: str | None = None) -> Config:
         if headless_default_agent not in headless_agents and headless_agents:
             headless_default_agent = next(iter(headless_agents))
 
+    env_headless_models = os.environ.get("TMUX_DASHBOARD_HEADLESS_MODELS")
+    loaded_models = _load_headless_models(data.get("headless_models"), env_headless_models)
+    if env_headless_models:
+        headless_models = loaded_models
+    else:
+        headless_models = dict(DEFAULT_HEADLESS_MODELS)
+        headless_models.update(loaded_models)
+
+    env_headless_default_model = os.environ.get("TMUX_DASHBOARD_HEADLESS_DEFAULT_MODEL")
+    loaded_default_models = _load_headless_default_models(
+        data.get("headless_default_model"),
+        env_headless_default_model,
+    )
+    if env_headless_default_model:
+        headless_default_models = loaded_default_models
+    else:
+        headless_default_models = dict(DEFAULT_HEADLESS_DEFAULT_MODELS)
+        headless_default_models.update(loaded_default_models)
+
+    headless_model_list_commands = _load_headless_model_list_commands(
+        data.get("headless_model_list_commands"),
+        os.environ.get("TMUX_DASHBOARD_HEADLESS_MODEL_LIST_COMMAND"),
+    )
+
+    if "TMUX_DASHBOARD_HEADLESS_AUTO_CLEANUP" in os.environ:
+        headless_auto_cleanup = _parse_bool(os.environ["TMUX_DASHBOARD_HEADLESS_AUTO_CLEANUP"])
+    else:
+        headless_auto_cleanup = bool(data.get("headless_auto_cleanup", DEFAULT_HEADLESS_AUTO_CLEANUP))
+
+    if "TMUX_DASHBOARD_HEADLESS_NOTIFY_ON_COMPLETE" in os.environ:
+        headless_notify_on_complete = _parse_bool(os.environ["TMUX_DASHBOARD_HEADLESS_NOTIFY_ON_COMPLETE"])
+    else:
+        headless_notify_on_complete = bool(
+            data.get("headless_notify_on_complete", DEFAULT_HEADLESS_NOTIFY_ON_COMPLETE)
+        )
+
     return Config(
         config_path=config_path,
         log_path=log_path,
@@ -188,6 +251,105 @@ def load_config(path: str | None = None) -> Config:
         headless_output_dir=headless_output_dir,
         headless_refresh_seconds=headless_refresh_seconds,
         headless_max_events=headless_max_events,
+        headless_waiting_seconds=headless_waiting_seconds,
         headless_default_agent=headless_default_agent,
         headless_agents=headless_agents,
+        headless_models=headless_models,
+        headless_default_models=headless_default_models,
+        headless_model_list_commands=headless_model_list_commands,
+        headless_auto_cleanup=headless_auto_cleanup,
+        headless_notify_on_complete=headless_notify_on_complete,
     )
+
+
+def _load_headless_models(config_value: Any, env_value: str | None) -> dict[str, list[str]]:
+    models: dict[str, list[str]] = {}
+
+    if env_value:
+        parsed = _parse_model_list(env_value)
+        if parsed:
+            models["*"] = parsed
+            return models
+
+    if isinstance(config_value, dict):
+        for key, value in config_value.items():
+            if not isinstance(key, str):
+                continue
+            parsed = _parse_model_list(value)
+            if parsed:
+                models[key.strip().lower()] = parsed
+    elif config_value is not None:
+        parsed = _parse_model_list(config_value)
+        if parsed:
+            models["*"] = parsed
+
+    return models
+
+
+def _load_headless_default_models(config_value: Any, env_value: str | None) -> dict[str, str]:
+    defaults: dict[str, str] = {}
+
+    if env_value:
+        cleaned = env_value.strip()
+        if cleaned:
+            defaults["*"] = cleaned
+            return defaults
+
+    if isinstance(config_value, dict):
+        for key, value in config_value.items():
+            if not isinstance(key, str):
+                continue
+            if not isinstance(value, str):
+                continue
+            cleaned = value.strip()
+            if cleaned:
+                defaults[key.strip().lower()] = cleaned
+    elif isinstance(config_value, str):
+        cleaned = config_value.strip()
+        if cleaned:
+            defaults["*"] = cleaned
+
+    return defaults
+
+
+def _parse_model_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        raw_items = value
+    elif isinstance(value, str):
+        raw_items = value.split(",")
+    else:
+        return []
+
+    parsed: list[str] = []
+    for item in raw_items:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if cleaned:
+            parsed.append(cleaned)
+    return parsed
+
+
+def _load_headless_model_list_commands(config_value: Any, env_value: str | None) -> dict[str, str]:
+    commands: dict[str, str] = {}
+
+    if env_value:
+        cleaned = env_value.strip()
+        if cleaned:
+            commands["*"] = cleaned
+            return commands
+
+    if isinstance(config_value, dict):
+        for key, value in config_value.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            cleaned_key = key.strip().lower()
+            cleaned_value = value.strip()
+            if cleaned_key and cleaned_value:
+                commands[cleaned_key] = cleaned_value
+    elif isinstance(config_value, str):
+        cleaned = config_value.strip()
+        if cleaned:
+            commands["*"] = cleaned
+
+    return commands

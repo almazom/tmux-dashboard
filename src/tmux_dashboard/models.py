@@ -74,3 +74,6 @@ class SessionInfo:
     is_ai_session: bool = False
     is_headless: bool = False
     headless_agent: str | None = None
+    headless_model: str | None = None
+    headless_status: str | None = None
+    headless_exit_code: int | None = None
