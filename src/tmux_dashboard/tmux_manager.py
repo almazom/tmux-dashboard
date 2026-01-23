@@ -24,6 +24,23 @@ AI_KEYWORDS = [
     "codex",
     "cladcode",
 ]
+AI_AGENT_KEYWORDS = {
+    "codex": ["codex"],
+    "cladcode": ["cladcode"],
+}
+
+
+def _contains_ai_keyword(value: str) -> bool:
+    lowered = value.lower()
+    return any(keyword in lowered for keyword in AI_KEYWORDS)
+
+
+def _match_ai_agent(value: str) -> str | None:
+    lowered = value.lower()
+    for agent, keywords in AI_AGENT_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return agent
+    return None
 
 try:
     import libtmux  # type: ignore
@@ -175,13 +192,14 @@ class TmuxManager:
         # Detect AI sessions and enrich session info
         sessions_with_ai = []
         for session in sessions:
-            is_ai = self._is_ai_session(session.name)
+            is_ai, agent = self._detect_ai_session(session.name)
             sessions_with_ai.append(
                 SessionInfo(
                     name=session.name,
                     attached=session.attached,
                     windows=session.windows,
                     is_ai_session=is_ai,
+                    ai_agent=agent,
                 )
             )
 
@@ -274,9 +292,24 @@ class TmuxManager:
 
         return sessions
 
-    def _is_ai_session(self, session_name: str) -> bool:
-        """Check if a session contains an AI agent by checking pane commands."""
-        # Try libtmux first
+    def _detect_ai_session(self, session_name: str) -> tuple[bool, str | None]:
+        """Detect whether a session is AI-related and, if possible, which agent."""
+        for command in self._iter_pane_commands(session_name):
+            agent = _match_ai_agent(command)
+            if agent:
+                return True, agent
+            if _contains_ai_keyword(command):
+                return True, None
+
+        agent = _match_ai_agent(session_name)
+        if agent:
+            return True, agent
+        if _contains_ai_keyword(session_name):
+            return True, None
+        return False, None
+
+    def _iter_pane_commands(self, session_name: str) -> list[str]:
+        commands: list[str] = []
         if self._libtmux:
             try:
                 details = self.get_session_details(session_name)
@@ -284,13 +317,12 @@ class TmuxManager:
                     for window in details.windows:
                         for pane in window.panes:
                             if pane.current_command:
-                                cmd_lower = pane.current_command.lower()
-                                if any(keyword in cmd_lower for keyword in AI_KEYWORDS):
-                                    return True
+                                commands.append(pane.current_command)
+                    if commands:
+                        return commands
             except Exception:
-                pass  # Fall through to CLI method
+                commands = []
 
-        # CLI fallback: get pane commands directly from tmux
         try:
             result = subprocess.run(
                 ["tmux", "list-panes", "-t", session_name, "-F", "#{pane_current_command}"],
@@ -299,14 +331,10 @@ class TmuxManager:
                 timeout=2,
             )
             if result.returncode == 0:
-                for line in result.stdout.splitlines():
-                    if any(keyword in line.lower() for keyword in AI_KEYWORDS):
-                        return True
+                commands = [line.strip() for line in result.stdout.splitlines() if line.strip()]
         except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-        # Last resort: check session name for AI keywords
-        return any(keyword in session_name.lower() for keyword in AI_KEYWORDS)
+            commands = []
+        return commands
 
     def _list_sessions_cli(self) -> list[SessionInfo]:
         result = subprocess.run(

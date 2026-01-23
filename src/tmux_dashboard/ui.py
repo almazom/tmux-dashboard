@@ -151,7 +151,11 @@ class DashboardUI:
                     num_prefix = f"{interactive_index}. " if interactive_index <= 9 else "  "
 
                 ai_prefix = "🤖 " if session.is_ai_session and not session.is_headless else ""
-                name = ai_prefix + session.name
+                ai_label = ""
+                if session.is_ai_session and not session.is_headless:
+                    agent_tag = session.ai_agent or "ai"
+                    ai_label = f" ({agent_tag})"
+                name = f"{ai_prefix}{session.name}{ai_label}"
                 status = "attached" if session.attached else "detached"
                 if session.is_headless:
                     agent = session.headless_agent or "headless"
