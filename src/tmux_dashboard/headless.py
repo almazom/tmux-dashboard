@@ -53,25 +53,17 @@ class HeadlessRegistry:
     def record(self, session: HeadlessSession) -> None:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "session_name": session.session_name,
-            "agent": session.agent,
-            "model": session.model,
-            "flow": session.flow,
-            "instruction": session.instruction,
-            "workdir": session.workdir,
-            "output_path": session.output_path,
-            "created_at": session.created_at,
-            "completed_at": session.completed_at,
-            "exit_code": session.exit_code,
-            "last_raw_line": session.last_raw_line,
-            "command": session.command,
-        }
+        payload = _session_payload(session)
         path = self.metadata_path(session.session_name)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=True), encoding="utf-8")
         Path(session.output_path).touch(exist_ok=True)
 
-    def update(self, session_name: str, updates: dict[str, Any]) -> None:
+    def update(
+        self,
+        session_name: str,
+        updates: dict[str, Any],
+        base: HeadlessSession | None = None,
+    ) -> bool:
         path = self.metadata_path(session_name)
         data: dict[str, Any] = {}
         if path.exists():
@@ -79,9 +71,18 @@ class HeadlessRegistry:
                 data = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 data = {}
+        if not data:
+            if base is None:
+                return False
+            data = _session_payload(base)
+        elif not _payload_has_required_fields(data):
+            if base is None:
+                return False
+            data = _session_payload(base)
         data.update(updates)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2, ensure_ascii=True), encoding="utf-8")
+        return True
 
     def load_all(self) -> dict[str, HeadlessSession]:
         sessions: dict[str, HeadlessSession] = {}
@@ -134,6 +135,31 @@ def build_headless_session(
         command=command,
     )
 
+
+def _session_payload(session: HeadlessSession) -> dict[str, Any]:
+    return {
+        "session_name": session.session_name,
+        "agent": session.agent,
+        "model": session.model,
+        "flow": session.flow,
+        "instruction": session.instruction,
+        "workdir": session.workdir,
+        "output_path": session.output_path,
+        "created_at": session.created_at,
+        "completed_at": session.completed_at,
+        "exit_code": session.exit_code,
+        "last_raw_line": session.last_raw_line,
+        "command": session.command,
+    }
+
+
+def _payload_has_required_fields(payload: dict[str, Any]) -> bool:
+    return bool(
+        payload.get("session_name")
+        and payload.get("agent")
+        and payload.get("workdir")
+        and payload.get("output_path")
+    )
 
 def build_headless_shell_command(
     template: str,

@@ -395,9 +395,7 @@ def run_dashboard(
                 )
                 if confirm:
                     try:
-                        tmux.kill_session(target.name)
-                        if target.is_headless:
-                            headless_registry.forget(target.name)
+                        _delete_session(tmux, headless_registry, target)
                         logger.info("delete", "session deleted", target.name)
                         sessions, headless_map, list_status = _refresh_sessions(
                             tmux,
@@ -574,6 +572,19 @@ def _attach_and_refresh(
     return sessions, headless_map, status, selected_index, actual_session_name
 
 
+def _delete_session(
+    tmux: TmuxManager,
+    headless_registry: HeadlessRegistry,
+    session: SessionInfo,
+) -> None:
+    if session.is_headless and session.headless_status == "missing":
+        headless_registry.forget(session.name)
+        return
+    tmux.kill_session(session.name)
+    if session.is_headless:
+        headless_registry.forget(session.name)
+
+
 def _safe_list_sessions(tmux: TmuxManager, logger: Logger, sort_mode: SortMode = SortMode.DEFAULT) -> tuple[list, UiStatus | None]:
     try:
         return tmux.list_sessions(sort_mode), None
@@ -620,6 +631,7 @@ def _apply_headless_metadata(
     if not headless_map:
         return sessions
     enriched: list[SessionInfo] = []
+    known_names = {session.name for session in sessions}
     for session in sessions:
         headless = headless_map.get(session.name)
         if headless:
@@ -632,6 +644,7 @@ def _apply_headless_metadata(
                     attached=session.attached,
                     windows=session.windows,
                     is_ai_session=True,
+                    ai_agent=headless.agent,
                     is_headless=True,
                     headless_agent=headless.agent,
                     headless_model=headless.model,
@@ -641,6 +654,26 @@ def _apply_headless_metadata(
             )
         else:
             enriched.append(session)
+    missing = [name for name in headless_map.keys() if name not in known_names]
+    for name in sorted(missing):
+        headless = headless_map[name]
+        status = status_map.get(name)
+        status_text = _status_to_label(status)
+        exit_code = getattr(status, "exit_code", None) if status else None
+        enriched.append(
+            SessionInfo(
+                name=headless.session_name,
+                attached=False,
+                windows=0,
+                is_ai_session=True,
+                ai_agent=headless.agent,
+                is_headless=True,
+                headless_agent=headless.agent,
+                headless_model=headless.model,
+                headless_status=status_text,
+                headless_exit_code=exit_code,
+            )
+        )
     return enriched
 
 
@@ -718,14 +751,18 @@ def _sync_headless_completion(
         completed_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         exit_code = getattr(status, "exit_code", None)
         last_raw = _read_last_raw_line(meta.output_path)
-        headless_registry.update(
+        updated_ok = headless_registry.update(
             name,
             {
                 "completed_at": completed_at,
                 "exit_code": exit_code,
                 "last_raw_line": last_raw,
             },
+            base=meta,
         )
+        if not updated_ok:
+            logger.warn("headless_update", "failed to update metadata", name)
+            continue
         updated[name] = HeadlessSession(
             session_name=meta.session_name,
             agent=meta.agent,
@@ -1177,10 +1214,11 @@ def _view_headless_session(
     last_refresh = 0.0
     base_refresh = max(1, config.headless_refresh_seconds)
     refresh_interval = base_refresh
-    max_refresh = max(base_refresh, base_refresh * 4)
+    max_refresh = max(base_refresh, base_refresh * 2)
     runtime_status = None
     waiting_input = False
     show_full_prompt = True
+    show_raw_output = False
     last_event_seen_at: float | None = None
 
     while True:
@@ -1219,7 +1257,16 @@ def _view_headless_session(
             waiting_input,
             refresh_interval,
         )
-        _render_headless_view(stdscr, session, output_lines, status_line, show_full_prompt)
+        display_lines = tailer.raw_lines() if show_raw_output else output_lines
+        output_label = "raw JSON" if show_raw_output else "parsed"
+        _render_headless_view(
+            stdscr,
+            session,
+            display_lines,
+            status_line,
+            show_full_prompt,
+            output_label,
+        )
 
         stdscr.timeout(200)
         key = stdscr.getch()
@@ -1230,6 +1277,8 @@ def _view_headless_session(
             logger.info("headless_view", "manual refresh", session_name)
         if key == ord("p"):
             show_full_prompt = not show_full_prompt
+        if key == ord("o"):
+            show_raw_output = not show_raw_output
         if key == ord("a"):
             _attach_from_headless_view(stdscr, tmux, session_name, logger, config)
             last_refresh = 0.0
@@ -1256,13 +1305,35 @@ def _view_headless_session(
                 return
 
 
+def _normalize_stream_line(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("event:"):
+        return None
+    if stripped.startswith("data:"):
+        stripped = stripped[5:].strip()
+        if not stripped:
+            return None
+    return stripped
+
+
+def _looks_like_json(line: str) -> bool:
+    return line.lstrip().startswith(("{", "["))
+
+
 class HeadlessLogTail:
+    MAX_JSON_BUFFER = 20000
+
     def __init__(self, output_path: str, max_events: int) -> None:
         self.path = Path(output_path)
         self.max_events = max_events
         self.offset = 0
         self.buffer = ""
+        self.json_buffer = ""
+        self.decoder = json.JSONDecoder()
         self.events: deque[list[str]] = deque(maxlen=max_events)
+        self.raw_events: deque[list[str]] = deque(maxlen=max_events)
         self.started_at = time.monotonic()
         self.last_event_at: float | None = None
 
@@ -1278,6 +1349,7 @@ class HeadlessLogTail:
             self.offset = 0
             self.buffer = ""
             self.events.clear()
+            self.raw_events.clear()
 
         try:
             with self.path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1297,17 +1369,10 @@ class HeadlessLogTail:
             self.buffer = ""
 
         for line in lines:
-            line = line.strip()
-            if not line:
+            normalized = _normalize_stream_line(line)
+            if normalized is None:
                 continue
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                self.events.append([line])
-                self.last_event_at = time.monotonic()
-                continue
-            self.events.append(_summarize_headless_event(payload))
-            self.last_event_at = time.monotonic()
+            self._ingest_line(normalized)
 
         return self._flatten_events()
 
@@ -1319,6 +1384,75 @@ class HeadlessLogTail:
             output_lines.extend(event_lines)
         return output_lines
 
+    def _ingest_line(self, line: str) -> None:
+        if line in {"[DONE]", "DONE"}:
+            self._append_event({"type": "done", "message": "completed"}, raw_text=line)
+            return
+
+        if self.json_buffer:
+            candidate = f"{self.json_buffer}\n{line}"
+            remaining = self._drain_json_buffer(candidate)
+            if remaining is None:
+                self.json_buffer = candidate
+                self._trim_json_buffer()
+            else:
+                self.json_buffer = remaining
+            return
+
+        if _looks_like_json(line):
+            remaining = self._drain_json_buffer(line)
+            if remaining is None:
+                self.json_buffer = line
+                self._trim_json_buffer()
+            else:
+                self.json_buffer = remaining
+            return
+
+        self._append_raw(line)
+
+    def raw_lines(self) -> list[str]:
+        if not self.raw_events:
+            return ["(waiting for output)"]
+        output_lines: list[str] = []
+        for event_lines in self.raw_events:
+            output_lines.extend(event_lines)
+        return output_lines
+
+    def _append_event(self, payload: Any, raw_text: str | None = None) -> None:
+        self.events.append(_summarize_headless_event(payload))
+        if raw_text is None:
+            try:
+                raw_text = json.dumps(payload, ensure_ascii=True)
+            except (TypeError, ValueError):
+                raw_text = str(payload)
+        self.raw_events.append([raw_text])
+        self.last_event_at = time.monotonic()
+
+    def _append_raw(self, line: str) -> None:
+        self.events.append([f"raw: {line}"])
+        self.raw_events.append([line])
+        self.last_event_at = time.monotonic()
+
+    def _drain_json_buffer(self, buffer: str) -> str | None:
+        data = buffer.lstrip()
+        if not data:
+            return ""
+        parsed_any = False
+        while data:
+            try:
+                payload, index = self.decoder.raw_decode(data)
+            except json.JSONDecodeError:
+                return None if not parsed_any else data
+            parsed_any = True
+            self._append_event(payload)
+            data = data[index:].lstrip()
+        return data
+
+    def _trim_json_buffer(self) -> None:
+        if len(self.json_buffer) > self.MAX_JSON_BUFFER:
+            self._append_raw(self.json_buffer)
+            self.json_buffer = ""
+
 
 def _render_headless_view(
     stdscr: curses._CursesWindow,
@@ -1326,8 +1460,10 @@ def _render_headless_view(
     output_lines: list[str],
     status_line: str,
     show_full_prompt: bool,
+    output_label: str,
 ) -> None:
     stdscr.erase()
+    _ensure_headless_colors()
     height, width = stdscr.getmaxyx()
     left = 2
     max_width = max(1, width - left - 1)
@@ -1381,7 +1517,7 @@ def _render_headless_view(
     if row < height - 4:
         row += 1
 
-    _safe_addstr(stdscr, row, left, "Output (parsed):"[:max_width])
+    _safe_addstr(stdscr, row, left, f"Output ({output_label}):"[:max_width])
     row += 1
 
     available = max(0, height - row - 2)
@@ -1391,10 +1527,13 @@ def _render_headless_view(
     if not wrapped_output:
         wrapped_output = ["(waiting for output)"]
     for line in wrapped_output[-available:]:
-        _safe_addstr(stdscr, row, left, line[:max_width])
+        attr = 0
+        if output_label == "parsed":
+            attr = _headless_event_attr(line)
+        _safe_addstr(stdscr, row, left, line[:max_width], attr)
         row += 1
 
-    footer = "q/Esc back  r refresh  p prompt  a attach  i input  k kill"
+    footer = "q/Esc back  r refresh  p prompt  o output  a attach  i input  k kill"
     _safe_addstr(stdscr, height - 2, left, footer[:max_width])
     _safe_addstr(stdscr, height - 1, left, status_line[:max_width])
     stdscr.refresh()
@@ -1560,6 +1699,65 @@ def _wrap_lines(text: str, width: int) -> list[str]:
     return textwrap.wrap(text, width=width) or [""]
 
 
+_HEADLESS_COLORS_READY = False
+
+
+def _ensure_headless_colors() -> None:
+    global _HEADLESS_COLORS_READY
+    if _HEADLESS_COLORS_READY:
+        return
+    if not curses.has_colors():
+        return
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
+        curses.init_pair(2, curses.COLOR_BLACK, curses.COLOR_CYAN)
+        curses.init_pair(3, curses.COLOR_GREEN, -1)
+        curses.init_pair(4, curses.COLOR_YELLOW, -1)
+        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
+        curses.init_pair(6, curses.COLOR_RED, -1)
+        curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_BLACK)
+        curses.init_pair(8, curses.COLOR_GREEN, curses.COLOR_BLACK)
+        curses.init_pair(9, curses.COLOR_BLUE, -1)
+        _HEADLESS_COLORS_READY = True
+    except curses.error:
+        return
+
+
+def _headless_event_attr(line: str) -> int:
+    if not curses.has_colors():
+        return 0
+    label = _extract_event_label(line)
+    if not label:
+        return 0
+    if label in {"thinking", "thought"}:
+        return curses.color_pair(1)
+    if label in {"tool", "tool_use", "tool_call"}:
+        return curses.color_pair(4)
+    if label in {"command", "cmd", "input"}:
+        return curses.color_pair(3)
+    if label in {"output", "text", "message", "content"}:
+        return curses.color_pair(8)
+    if label in {"error", "warning"}:
+        return curses.color_pair(6)
+    if label in {"system"}:
+        return curses.color_pair(9)
+    return 0
+
+
+def _extract_event_label(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("raw:"):
+        return "raw"
+    head = stripped.split(":", 1)[0].strip()
+    parts = head.split()
+    label = parts[-1] if parts else head
+    return label.lower() if label else None
+
+
 def _summarize_prompt(text: str, bullets: int = 3) -> list[str]:
     normalized = " ".join(text.split())
     if not normalized:
@@ -1682,13 +1880,19 @@ def _confirm_dialog(
             return False
 
 
-def _safe_addstr(stdscr: curses._CursesWindow, y: int, x: int, text: str) -> None:
+def _safe_addstr(
+    stdscr: curses._CursesWindow,
+    y: int,
+    x: int,
+    text: str,
+    attr: int = 0,
+) -> None:
     height, width = stdscr.getmaxyx()
     if y < 0 or y >= height or x < 0 or x >= width:
         return
     if x + len(text) >= width:
         text = text[: max(0, width - x - 1)]
     try:
-        stdscr.addstr(y, x, text)
+        stdscr.addstr(y, x, text, attr)
     except curses.error:
         pass
