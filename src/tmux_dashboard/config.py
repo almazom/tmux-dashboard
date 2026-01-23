@@ -24,8 +24,17 @@ DEFAULT_HEADLESS_REFRESH_SECONDS = 5
 DEFAULT_HEADLESS_MAX_EVENTS = 200
 DEFAULT_HEADLESS_WAITING_SECONDS = 20
 DEFAULT_HEADLESS_DEFAULT_AGENT = "codex"
+DEFAULT_HEADLESS_CODEX_STREAM_JSON = True
+DEFAULT_HEADLESS_CODEX_CMD_STREAM = (
+    "codex --model {model} --headless --output-format stream-json --prompt {instruction} 2>&1 | tee -a {output}"
+)
+DEFAULT_HEADLESS_CODEX_CMD_TEXT = (
+    "codex --model {model} --headless --prompt {instruction} 2>&1 "
+    "| python3 -m tmux_dashboard.codex_wrapper --raw-to-stderr "
+    "| tee -a {output} >/dev/null"
+)
 DEFAULT_HEADLESS_AGENTS = {
-    "codex": "codex --model {model} --headless --prompt {instruction} 2>&1 | tee -a {output}",
+    "codex": DEFAULT_HEADLESS_CODEX_CMD_STREAM,
     "cladcode": "cladcode -p {instruction} --output-format stream-json --non-interactive 2>&1 | tee -a {output}",
 }
 DEFAULT_HEADLESS_MODELS: dict[str, list[str]] = {
@@ -60,6 +69,7 @@ class Config:
     headless_waiting_seconds: int = field(default_factory=lambda: DEFAULT_HEADLESS_WAITING_SECONDS)
     headless_default_agent: str = field(default_factory=lambda: DEFAULT_HEADLESS_DEFAULT_AGENT)
     headless_agents: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_AGENTS))
+    headless_codex_stream_json: bool = field(default_factory=lambda: DEFAULT_HEADLESS_CODEX_STREAM_JSON)
     headless_models: dict[str, list[str]] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_MODELS))
     headless_default_models: dict[str, str] = field(default_factory=lambda: dict(DEFAULT_HEADLESS_DEFAULT_MODELS))
     headless_model_list_commands: dict[str, str] = field(
@@ -174,6 +184,7 @@ def load_config(path: str | None = None) -> Config:
     )
 
     headless_agents = dict(DEFAULT_HEADLESS_AGENTS)
+    codex_override = False
     agents_from_config = data.get("headless_agents")
     if isinstance(agents_from_config, dict):
         for key, value in agents_from_config.items():
@@ -182,15 +193,32 @@ def load_config(path: str | None = None) -> Config:
             cleaned_key = key.strip().lower()
             cleaned_value = value.strip()
             if cleaned_key and cleaned_value:
+                if cleaned_key == "codex":
+                    codex_override = True
                 headless_agents[cleaned_key] = cleaned_value
 
     env_codex = os.environ.get("TMUX_DASHBOARD_HEADLESS_CODEX_CMD")
     if env_codex:
+        codex_override = True
         headless_agents["codex"] = env_codex.strip()
 
     env_cladcode = os.environ.get("TMUX_DASHBOARD_HEADLESS_CLADCODE_CMD")
     if env_cladcode:
         headless_agents["cladcode"] = env_cladcode.strip()
+
+    if "TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON" in os.environ:
+        headless_codex_stream_json = _parse_bool(os.environ["TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON"])
+    else:
+        headless_codex_stream_json = bool(
+            data.get("headless_codex_stream_json", DEFAULT_HEADLESS_CODEX_STREAM_JSON)
+        )
+
+    if not codex_override:
+        headless_agents["codex"] = (
+            DEFAULT_HEADLESS_CODEX_CMD_STREAM
+            if headless_codex_stream_json
+            else DEFAULT_HEADLESS_CODEX_CMD_TEXT
+        )
 
     headless_default_agent = (
         os.environ.get("TMUX_DASHBOARD_HEADLESS_DEFAULT_AGENT")
@@ -254,6 +282,7 @@ def load_config(path: str | None = None) -> Config:
         headless_waiting_seconds=headless_waiting_seconds,
         headless_default_agent=headless_default_agent,
         headless_agents=headless_agents,
+        headless_codex_stream_json=headless_codex_stream_json,
         headless_models=headless_models,
         headless_default_models=headless_default_models,
         headless_model_list_commands=headless_model_list_commands,

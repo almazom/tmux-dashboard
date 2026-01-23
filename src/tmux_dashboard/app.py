@@ -171,6 +171,7 @@ Environment Variables:
   TMUX_DASHBOARD_HEADLESS_WAITING_SECONDS  Headless idle threshold seconds (default: 20)
   TMUX_DASHBOARD_HEADLESS_DEFAULT_AGENT Default headless agent (default: codex)
   TMUX_DASHBOARD_HEADLESS_CODEX_CMD     Override codex headless command template
+  TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON  Force codex stream-json output (default: true)
   TMUX_DASHBOARD_HEADLESS_CLADCODE_CMD  Override cladcode headless command template
   TMUX_DASHBOARD_HEADLESS_MODELS        Comma-separated model list (applies to all agents)
   TMUX_DASHBOARD_HEADLESS_DEFAULT_MODEL Default model (applies to all agents)
