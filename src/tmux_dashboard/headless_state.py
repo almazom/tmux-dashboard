@@ -207,18 +207,69 @@ def notify_headless_complete(logger: Logger, session: HeadlessSession) -> None:
 def summarize_prompt(text: str, bullets: int = 3) -> list[str]:
     normalized = " ".join(text.split())
     if not normalized:
-        return ["(empty)"] + ["..."] * (bullets - 1)
+        return [
+            "🧭Суть: пустой запрос",
+            "🧪Проверить: нет данных",
+            "🎯Итог: нет ожиданий",
+        ]
+
+    keywords = _extract_keywords(normalized)
+    if not _contains_cyrillic(normalized):
+        keywords = []
+    fallback = [
+        "задача", "сессия", "тест",
+        "лог", "модель", "вывод",
+        "ошибка", "стабильность", "результат",
+    ]
+    merged = keywords + [word for word in fallback if word not in keywords]
+    while len(merged) < 9:
+        merged.append("деталь")
+
+    parts = merged[:9]
+    return [
+        f"🧭Суть: {parts[0]} {parts[1]} {parts[2]}",
+        f"🧪Проверить: {parts[3]} {parts[4]} {parts[5]}",
+        f"🎯Итог: {parts[6]} {parts[7]} {parts[8]}",
+    ]
+
+
+def _extract_keywords(text: str) -> list[str]:
+    words = re.findall(r"[A-Za-zА-Яа-я0-9_]+", text)
+    stopwords = {
+        "and", "the", "this", "that", "with", "from", "into", "only", "without",
+        "для", "что", "это", "как", "без", "или", "его", "ее", "ещё", "еще",
+        "так", "там", "тут", "чтобы", "если", "при", "над", "под",
+        "про", "все", "всё", "можно", "нужно",
+    }
+    seen: set[str] = set()
+    result: list[str] = []
+    for word in words:
+        lower = word.lower()
+        if lower in stopwords:
+            continue
+        if len(lower) < 3:
+            continue
+        if lower in seen:
+            continue
+        seen.add(lower)
+        result.append(lower)
+        if len(result) >= 9:
+            break
+    return result
+
+
+def _contains_cyrillic(text: str) -> bool:
+    return bool(re.search(r"[А-Яа-я]", text))
+
+
+def summarize_expected_outcome(text: str, max_words: int = 12) -> str:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return "(не задано)"
 
     sentences = [s.strip() for s in re.split(r"(?<=[.!?])\\s+", normalized) if s.strip()]
-    if len(sentences) >= bullets:
-        return sentences[:bullets]
-
-    words = normalized.split()
-    total = len(words)
-    summary: list[str] = []
-    for idx in range(bullets):
-        start = round(idx * total / bullets)
-        end = round((idx + 1) * total / bullets)
-        chunk = " ".join(words[start:end]).strip()
-        summary.append(chunk or "...")
-    return summary
+    candidate = sentences[0] if sentences else normalized
+    words = candidate.split()
+    if len(words) > max_words:
+        candidate = " ".join(words[:max_words]) + "…"
+    return candidate

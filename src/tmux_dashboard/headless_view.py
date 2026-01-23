@@ -7,12 +7,13 @@ import json
 import textwrap
 import time
 from collections import deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .config import Config
 from .headless import HeadlessRegistry, HeadlessSession
-from .headless_state import summarize_prompt, sync_headless_completion
+from .headless_state import summarize_expected_outcome, summarize_prompt, sync_headless_completion
 from .logger import Logger
 from .prompts import confirm_dialog, prompt_input_popup, safe_addstr, show_message
 from .session_actions import do_attach
@@ -43,6 +44,7 @@ def run_headless_view(
     show_full_prompt = True
     show_raw_output = False
     last_event_seen_at: float | None = None
+    idle_for: float = 0.0
 
     while True:
         now = time.monotonic()
@@ -74,11 +76,17 @@ def run_headless_view(
                     refresh_interval = min(max_refresh, refresh_interval + base_refresh)
             last_refresh = now
 
+        idle_for = now - (tailer.last_event_at or tailer.started_at)
+        elapsed_seconds = compute_elapsed_seconds(session, runtime_status)
+        spinner = status_spinner_frame(now) if runtime_status and getattr(runtime_status, "running", False) else ""
         status_line = format_headless_status_line(
             session,
             runtime_status,
             waiting_input,
             refresh_interval,
+            spinner=spinner,
+            idle_for=idle_for,
+            elapsed_seconds=elapsed_seconds,
         )
         display_lines = tailer.raw_lines() if show_raw_output else output_lines
         output_label = "raw JSON" if show_raw_output else "parsed"
@@ -222,6 +230,17 @@ def render_headless_view(
         height - 4,
     )
 
+    if row < height - 6:
+        row += 1
+        safe_addstr(stdscr, row, left, "Ожидаемый итог:"[:max_width])
+        row += 1
+        outcome = summarize_expected_outcome(session.instruction or "")
+        for line in wrap_lines(outcome, max_width):
+            if row >= height - 6:
+                break
+            safe_addstr(stdscr, row, left, line[:max_width])
+            row += 1
+
     if session.last_raw_line and row < height - 6:
         row += 1
         safe_addstr(stdscr, row, left, "Last raw line:"[:max_width])
@@ -273,9 +292,13 @@ def format_headless_status_line(
     runtime_status: object,
     waiting_input: bool,
     refresh_interval: int,
+    spinner: str = "",
+    idle_for: float | None = None,
+    elapsed_seconds: float | None = None,
 ) -> str:
     output_name = Path(session.output_path).name
     status_text = "unknown"
+    status_kind = "unknown"
     exit_code = None
     if runtime_status:
         exists = getattr(runtime_status, "exists", False)
@@ -283,13 +306,26 @@ def format_headless_status_line(
         exit_code = getattr(runtime_status, "exit_code", None)
         if not exists:
             status_text = "missing"
+            status_kind = "missing"
         elif running:
             status_text = "waiting input" if waiting_input else "running"
+            status_kind = "waiting_input" if waiting_input else "running"
         else:
             status_text = "completed"
+            status_kind = "completed"
 
     if status_text == "completed" and exit_code is not None:
         status_text = f"completed (exit {exit_code})"
+
+    icon = status_icon(status_kind)
+    if spinner and status_kind in {"running", "waiting_input"}:
+        status_text = f"{spinner} {status_text}"
+    if icon:
+        status_text = f"{icon} {status_text}"
+    if idle_for is not None and status_kind in {"running", "waiting_input"}:
+        status_text = f"{status_text}  idle {int(idle_for)}s"
+    if elapsed_seconds is not None:
+        status_text = f"{status_text}  elapsed {format_duration(elapsed_seconds)}"
 
     return f"Status: {status_text}  Output: {output_name}  Refresh: {refresh_interval}s"
 
@@ -372,6 +408,8 @@ class HeadlessLogTail:
             return ["(waiting for output)"]
         output_lines: list[str] = []
         for event_lines in self.events:
+            if output_lines:
+                output_lines.append("│")
             output_lines.extend(event_lines)
         return output_lines
 
@@ -448,6 +486,10 @@ class HeadlessLogTail:
 def summarize_headless_event(payload: Any) -> list[str]:
     if isinstance(payload, dict):
         event_type = stringify_event_value(payload.get("type") or payload.get("event") or payload.get("kind"))
+        codex_lines = summarize_codex_event(payload, event_type)
+        if codex_lines is not None:
+            return codex_lines
+
         message = extract_event_message(payload)
         if message:
             lines = message.splitlines() or [message]
@@ -457,11 +499,80 @@ def summarize_headless_event(payload: Any) -> list[str]:
             except (TypeError, ValueError):
                 lines = [str(payload)]
         if event_type:
-            emoji = event_emoji(event_type)
-            label = f"{emoji} {event_type}" if emoji else event_type
-            lines[0] = f"{label}: {lines[0]}"
+            lines[0] = format_event_line(event_type, lines[0])
         return lines
     return [str(payload)]
+
+
+def summarize_codex_event(payload: dict[str, Any], event_type: str | None) -> list[str] | None:
+    if not event_type:
+        return None
+    normalized = event_type.strip().lower()
+    if normalized == "thread.started":
+        return [format_event_line("thread.started")]
+    if normalized == "turn.started":
+        return [format_event_line("turn.started")]
+    if normalized == "turn.completed":
+        usage = payload.get("usage")
+        summary = summarize_usage(usage)
+        return [format_event_line("turn.completed", summary, separator="  ")] if summary else [
+            format_event_line("turn.completed")
+        ]
+    if normalized != "item.completed":
+        return None
+
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = stringify_event_value(item.get("type") or item.get("kind") or item.get("role"))
+    message = stringify_event_value(item.get("text") or item.get("content") or item.get("message"))
+    if not message:
+        message = extract_event_message(item) or None
+
+    label = (item_type or "item").strip().lower()
+    if label in {"assistant", "assistant_message", "agent_message", "message", "output_text"}:
+        label = "message"
+    elif label in {"reasoning", "thought"}:
+        label = "reasoning"
+    elif label in {"tool", "tool_call", "tool_use"}:
+        label = "tool"
+
+    return [format_event_line(label, message)] if message else [format_event_line(label)]
+
+
+def format_event_line(label: str, message: str | None = None, separator: str = ": ") -> str:
+    emoji = event_emoji(label)
+    title = f"{emoji} {label}" if emoji else label
+    if not message:
+        return title
+    return f"{title}{separator}{message}"
+
+
+def summarize_usage(usage: Any) -> str | None:
+    if not isinstance(usage, dict):
+        return None
+    input_tokens = _as_int(usage.get("input_tokens"))
+    cached_tokens = _as_int(usage.get("cached_input_tokens") or usage.get("cache_input_tokens"))
+    output_tokens = _as_int(usage.get("output_tokens"))
+    parts: list[str] = []
+    if input_tokens is not None:
+        parts.append(f"in {input_tokens}")
+    if cached_tokens is not None:
+        parts.append(f"cached {cached_tokens}")
+    if output_tokens is not None:
+        parts.append(f"out {output_tokens}")
+    if not parts:
+        return None
+    return "📊 " + " / ".join(parts)
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None
 
 
 def extract_event_message(payload: dict[str, Any]) -> str | None:
@@ -556,7 +667,7 @@ def headless_event_attr(line: str) -> int:
     label = extract_event_label(line)
     if not label:
         return 0
-    if label in {"thinking", "thought"}:
+    if label in {"thinking", "thought", "reasoning"}:
         return curses.color_pair(1)
     if label in {"tool", "tool_use", "tool_call"}:
         return curses.color_pair(4)
@@ -605,8 +716,12 @@ def render_bullets(
 def event_emoji(event_type: str) -> str:
     key = event_type.strip().lower()
     mapping = {
+        "thread.started": "🧵",
+        "turn.started": "▶️",
+        "turn.completed": "✅",
         "thinking": "🧠",
         "thought": "🧠",
+        "reasoning": "🧠",
         "tool": "🛠",
         "tool_use": "🛠",
         "tool_call": "🛠",
@@ -616,9 +731,60 @@ def event_emoji(event_type: str) -> str:
         "output": "💬",
         "text": "💬",
         "message": "💬",
+        "agent_message": "💬",
         "content": "💬",
         "error": "⚠️",
         "warning": "⚠️",
         "system": "📌",
     }
     return mapping.get(key, "")
+
+
+def status_icon(status_kind: str) -> str:
+    return {
+        "running": "⏳",
+        "waiting_input": "⌛",
+        "completed": "✅",
+        "missing": "⚠️",
+    }.get(status_kind, "")
+
+
+def status_spinner_frame(now: float) -> str:
+    frames = "|/-\\"
+    return frames[int(now * 6) % len(frames)]
+
+
+def compute_elapsed_seconds(session: HeadlessSession, runtime_status: object) -> float | None:
+    start_dt = parse_iso8601(session.created_at)
+    if not start_dt:
+        return None
+    running = runtime_status and getattr(runtime_status, "running", False)
+    if not running and session.completed_at:
+        end_dt = parse_iso8601(session.completed_at) or datetime.now(timezone.utc)
+    else:
+        end_dt = datetime.now(timezone.utc)
+    elapsed = (end_dt - start_dt).total_seconds()
+    return max(0.0, elapsed)
+
+
+def parse_iso8601(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    candidate = value.strip()
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+
+
+def format_duration(seconds: float) -> str:
+    total = int(max(0, seconds))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m{sec:02d}s"
+    if minutes:
+        return f"{minutes}m{sec:02d}s"
+    return f"{sec}s"
