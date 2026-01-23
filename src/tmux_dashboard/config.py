@@ -26,10 +26,10 @@ DEFAULT_HEADLESS_WAITING_SECONDS = 20
 DEFAULT_HEADLESS_DEFAULT_AGENT = "codex"
 DEFAULT_HEADLESS_CODEX_STREAM_JSON = True
 DEFAULT_HEADLESS_CODEX_CMD_STREAM = (
-    "codex --model {model} --headless --output-format stream-json --prompt {instruction} 2>&1 | tee -a {output}"
+    "codex exec --json --model {model}{reasoning} -- {instruction} 2>&1 | tee -a {output}"
 )
 DEFAULT_HEADLESS_CODEX_CMD_TEXT = (
-    "codex --model {model} --headless --prompt {instruction} 2>&1 "
+    "codex exec --model {model}{reasoning} -- {instruction} 2>&1 "
     "| python3 -m tmux_dashboard.codex_wrapper --raw-to-stderr "
     "| tee -a {output} >/dev/null"
 )

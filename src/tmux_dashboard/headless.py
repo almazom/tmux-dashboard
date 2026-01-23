@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 from dataclasses import dataclass
@@ -161,6 +162,45 @@ def _payload_has_required_fields(payload: dict[str, Any]) -> bool:
         and payload.get("output_path")
     )
 
+
+def _split_codex_model(model: str) -> tuple[str, str | None]:
+    parts = model.split()
+    if len(parts) < 2:
+        return model, None
+    return " ".join(parts[:-1]), parts[-1]
+
+
+def _ensure_codex_flags(template: str, agent: str) -> str:
+    if agent.strip().lower() != "codex":
+        return template
+
+    flags_value = os.environ.get("TMUX_DASHBOARD_HEADLESS_CODEX_FLAGS")
+    if flags_value is not None:
+        normalized = flags_value.strip()
+        if not normalized or normalized.lower() in {"0", "false", "off", "none"}:
+            return template
+        try:
+            required_flags = shlex.split(flags_value)
+        except ValueError:
+            required_flags = [flags_value]
+    else:
+        required_flags = [
+            "--dangerously-bypass-approvals-and-sandbox",
+        ]
+    missing = [flag for flag in required_flags if flag not in template]
+    if not missing:
+        return template
+
+    flags = " ".join(missing)
+    for subcommand in ("exec", "run"):
+        needle = f"codex {subcommand}"
+        if needle in template:
+            return template.replace(needle, f"{needle} {flags}", 1)
+    if "codex" in template:
+        return template.replace("codex", f"codex {flags}", 1)
+    return template
+
+
 def build_headless_shell_command(
     template: str,
     instruction: str,
@@ -169,17 +209,29 @@ def build_headless_shell_command(
     agent: str,
     model: str | None,
 ) -> list[str]:
+    instruction = instruction.strip()
+    if not instruction:
+        raise ValueError("Instruction is required")
+
+    template = _ensure_codex_flags(template, agent)
+    model_value = model.strip() if model else ""
+    reasoning = ""
+    if agent.strip().lower() == "codex" and model_value:
+        model_value, reasoning = _split_codex_model(model_value)
+
     safe_instruction = shlex.quote(instruction)
     safe_output = shlex.quote(output_path)
     safe_workdir = shlex.quote(workdir)
     safe_agent = shlex.quote(agent)
-    safe_model = shlex.quote(model) if model else ""
+    safe_model = shlex.quote(model_value) if model_value else ""
+    safe_reasoning = f" -c reasoning={shlex.quote(reasoning)}" if reasoning else ""
     rendered = template.format(
         instruction=safe_instruction,
         output=safe_output,
         cwd=safe_workdir,
         agent=safe_agent,
         model=safe_model,
+        reasoning=safe_reasoning,
     )
     env_vars = {
         "TMUX_DASHBOARD_HEADLESS_INSTRUCTION": instruction,
