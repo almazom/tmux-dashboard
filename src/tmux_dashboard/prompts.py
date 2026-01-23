@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import curses
+import textwrap
 
 
 def safe_addstr(
@@ -67,7 +68,28 @@ def prompt_input_popup(
         safe_addstr(stdscr, center_y + 2, help_x, help_text)
         stdscr.refresh()
 
-        key = stdscr.getch()
+        try:
+            key = stdscr.get_wch()
+        except curses.error:
+            continue
+        if isinstance(key, str):
+            if key in ("\n", "\r"):
+                break
+            if key == "\x1b":
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+                return None
+            if key in ("\x7f", "\b"):
+                if buffer:
+                    buffer.pop()
+                continue
+            if key.isprintable():
+                if len(buffer) < max_len:
+                    buffer.append(key)
+            continue
+
         if key in (10, 13):
             break
         if key == 27:
@@ -153,11 +175,82 @@ def draw_center_box(
 def show_message(stdscr: curses._CursesWindow, message: str) -> None:
     height, width = stdscr.getmaxyx()
     stdscr.erase()
-    line = message[: max(0, width - 1)]
-    y = max(0, height // 2)
-    x = max(0, (width - len(line)) // 2)
-    safe_addstr(stdscr, y, x, line)
-    safe_addstr(stdscr, y + 1, x, "Press any key to return"[: max(0, width - x - 1)])
+
+    if width < 20 or height < 7:
+        line = message[: max(0, width - 1)]
+        y = max(0, height // 2)
+        x = max(0, (width - len(line)) // 2)
+        safe_addstr(stdscr, y, x, line)
+        stdscr.refresh()
+        stdscr.getch()
+        return
+
+    title = "ALERT"
+    footer = "Enter=ok  Esc=close"
+    raw_lines = message.splitlines() if message else [""]
+    max_line = max([len(title), len(footer), *[len(line) for line in raw_lines]])
+    inner_width = min(width - 6, max(16, max_line))
+    inner_width = max(10, inner_width)
+    box_width = inner_width + 2
+
+    body_lines: list[str] = []
+    for line in raw_lines:
+        if not line:
+            body_lines.append("")
+            continue
+        body_lines.extend(textwrap.wrap(line, width=inner_width, break_long_words=True))
+    if not body_lines:
+        body_lines = [""]
+
+    max_body = max(1, height - 6)
+    if len(body_lines) > max_body:
+        body_lines = body_lines[:max_body]
+
+    box_height = 6 + len(body_lines)
+    top = max(0, (height - box_height) // 2)
+    left = max(0, (width - box_width) // 2)
+
+    border_attr = curses.A_DIM
+    title_bar_attr = curses.A_BOLD
+    footer_attr = curses.A_REVERSE
+    if curses.has_colors():
+        try:
+            curses.start_color()
+            curses.use_default_colors()
+            curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLUE)
+            curses.init_pair(6, curses.COLOR_RED, -1)
+            curses.init_pair(10, curses.COLOR_WHITE, curses.COLOR_RED)
+            border_attr |= curses.color_pair(6)
+            title_bar_attr |= curses.color_pair(10)
+            footer_attr |= curses.color_pair(5)
+        except curses.error:
+            pass
+
+    safe_addstr(stdscr, top, left, "+" + "=" * max(0, box_width - 2) + "+", border_attr)
+    safe_addstr(stdscr, top + 1, left, "|", border_attr)
+    safe_addstr(stdscr, top + 1, left + 1, " " * max(0, box_width - 2), title_bar_attr)
+    safe_addstr(stdscr, top + 1, left + box_width - 1, "|", border_attr)
+    safe_addstr(stdscr, top + 1, left + 2, title[:inner_width], title_bar_attr)
+    safe_addstr(stdscr, top + 2, left, "+" + "-" * max(0, box_width - 2) + "+", border_attr)
+
+    row = top + 3
+    for line in body_lines:
+        safe_addstr(stdscr, row, left, "|", border_attr)
+        safe_addstr(stdscr, row, left + 1, " " * max(0, box_width - 2))
+        safe_addstr(stdscr, row, left + 2, line[:inner_width])
+        safe_addstr(stdscr, row, left + box_width - 1, "|", border_attr)
+        row += 1
+
+    safe_addstr(stdscr, row, left, "+" + "-" * max(0, box_width - 2) + "+", border_attr)
+    row += 1
+    safe_addstr(stdscr, row, left, "|", border_attr)
+    safe_addstr(stdscr, row, left + 1, " " * max(0, box_width - 2), footer_attr)
+    safe_addstr(stdscr, row, left + box_width - 1, "|", border_attr)
+    footer_x = left + 2 + max(0, (inner_width - len(footer)) // 2)
+    safe_addstr(stdscr, row, footer_x, footer[:inner_width], footer_attr)
+    row += 1
+    safe_addstr(stdscr, row, left, "+" + "=" * max(0, box_width - 2) + "+", border_attr)
+
     stdscr.refresh()
     stdscr.timeout(-1)
     stdscr.getch()
