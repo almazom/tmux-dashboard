@@ -65,7 +65,7 @@ The "Headless Session" system introduces a metadata layer on top of standard tmu
 2.  **Workdir**: Defaults to current directory. Press Enter to accept.
 3.  **Agent**: Enter agent name (configured in `config.json`, e.g., `codex`, `cladcode`).
 4.  **Model**: Select from list or type manual. (Support for `?` to list CLI models).
-5.  **Instruction**: Enter the prompt for the agent.
+5.  **Instruction**: Enter the prompt for the agent (required).
 
 ### Viewing & Interaction
 
@@ -87,7 +87,7 @@ The "Headless Session" system introduces a metadata layer on top of standard tmu
   "headless_state_dir": "~/.local/state/tmux-dashboard/headless",
   "headless_output_dir": "~/.local/state/tmux-dashboard/headless/output",
   "headless_agents": {
-    "codex": "codex --model {model} --headless --output-format stream-json --prompt {instruction} 2>&1 | tee -a {output}",
+    "codex": "codex exec --json --model {model}{reasoning} -- {instruction} 2>&1 | tee -a {output}",
     "cladcode": "cladcode --model {model} -m {instruction} > {output}"
   },
   "headless_models": {
@@ -99,7 +99,7 @@ The "Headless Session" system introduces a metadata layer on top of standard tmu
 }
 ```
 
-If `headless_codex_stream_json` is false, the dashboard wraps Codex text output
+If `headless_codex_stream_json` is false, the dashboard wraps `codex exec` text output
 into JSONL using `python3 -m tmux_dashboard.codex_wrapper`, while preserving
 raw output in the tmux pane.
 

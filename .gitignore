@@ -53,6 +53,14 @@ yarn-error.log*
 .env.local
 .env.*.local
 
+# Images
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.svg
+*.webp
+
 # Testing & Coverage
 .pytest_cache/
 .coverage
