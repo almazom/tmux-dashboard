@@ -58,5 +58,7 @@ target-version = ['py38', 'py39', 'py310', 'py311']
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
 ignore = ["E501"]
