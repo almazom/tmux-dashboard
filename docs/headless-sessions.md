@@ -73,6 +73,7 @@ The "Headless Session" system introduces a metadata layer on top of standard tmu
 *   **Preview**: The right pane shows the live output log.
 *   **Enter**: Opens a detailed "Headless View" with full prompt, metadata, and live log tailing.
     *   `p`: Toggle full prompt display.
+    *   `o`: Toggle parsed/raw JSON output.
     *   `r`: Force refresh.
     *   `a`: Attach (standard tmux attach).
     *   `i`: Send input (send text to the running process).
@@ -86,16 +87,21 @@ The "Headless Session" system introduces a metadata layer on top of standard tmu
   "headless_state_dir": "~/.local/state/tmux-dashboard/headless",
   "headless_output_dir": "~/.local/state/tmux-dashboard/headless/output",
   "headless_agents": {
-    "codex": "codex run --model {model} --instruction {instruction} --output {output}",
+    "codex": "codex --model {model} --headless --output-format stream-json --prompt {instruction} 2>&1 | tee -a {output}",
     "cladcode": "cladcode --model {model} -m {instruction} > {output}"
   },
   "headless_models": {
     "codex": ["gpt-4", "gpt-3.5-turbo"],
     "cladcode": ["claude-3-opus", "claude-3-sonnet"]
   },
-  "headless_default_agent": "codex"
+  "headless_default_agent": "codex",
+  "headless_codex_stream_json": true
 }
 ```
+
+If `headless_codex_stream_json` is false, the dashboard wraps Codex text output
+into JSONL using `python3 -m tmux_dashboard.codex_wrapper`, while preserving
+raw output in the tmux pane.
 
 ## Implementation Details
 
