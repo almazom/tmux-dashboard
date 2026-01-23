@@ -1,7 +1,13 @@
 import json
 
+import pytest
+
 from tmux_dashboard.config import load_config
-from tmux_dashboard.headless import HeadlessRegistry, build_headless_session
+from tmux_dashboard.headless import (
+    HeadlessRegistry,
+    build_headless_session,
+    build_headless_shell_command,
+)
 from tmux_dashboard.headless_state import (
     apply_headless_metadata,
     auto_cleanup_headless,
@@ -77,7 +83,47 @@ def test_load_config_headless_codex_stream_toggle(tmp_path, monkeypatch):
 
     monkeypatch.setenv("TMUX_DASHBOARD_HEADLESS_CODEX_STREAM_JSON", "1")
     config = load_config(path=str(config_path))
-    assert "stream-json" in config.headless_agents["codex"]
+    assert "--json" in config.headless_agents["codex"]
+
+
+def test_build_headless_shell_command_requires_instruction():
+    with pytest.raises(ValueError):
+        build_headless_shell_command(
+            "codex exec --json --model {model}{reasoning} -- {instruction}",
+            "   ",
+            "/tmp/out.jsonl",
+            "/tmp",
+            "codex",
+            "gpt-5.2-codex",
+        )
+
+
+def test_build_headless_shell_command_codex_reasoning():
+    command = build_headless_shell_command(
+        "codex exec --json --model {model}{reasoning} -- {instruction}",
+        "say ok",
+        "/tmp/out.jsonl",
+        "/tmp",
+        "codex",
+        "gpt-5.2-codex xhigh",
+    )
+    rendered = command[-1]
+    assert "--model gpt-5.2-codex" in rendered
+    assert "reasoning=xhigh" in rendered
+
+
+def test_build_headless_shell_command_injects_codex_flags():
+    command = build_headless_shell_command(
+        "codex exec --model {model}{reasoning} -- {instruction}",
+        "say ok",
+        "/tmp/out.jsonl",
+        "/tmp",
+        "codex",
+        "gpt-5.2-codex medium",
+    )
+    rendered = command[-1]
+    assert "--search" not in rendered
+    assert "--dangerously-bypass-approvals-and-sandbox" in rendered
 
 
 def test_headless_log_tail_handles_partial_lines(tmp_path):
