@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import argparse
+import os
+import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 
-from .config import load_config
+from .config import Config, load_config
 from .headless import HeadlessRegistry
 from .input_handler import run_dashboard
-from .instance_lock import LockAcquisitionError, ensure_single_instance
+from .instance_lock import InstanceLock, LockAcquisitionError, ensure_single_instance
 from .logger import Logger
 from .tmux_manager import TmuxError, TmuxManager
+
+CONFLICT_ACTION_ENV = "TMUX_DASHBOARD_CONFLICT_ACTION"
 
 
 @dataclass
@@ -39,6 +44,130 @@ def _attach_and_rename(
     return None
 
 
+def _read_lock_info() -> dict[str, str | None]:
+    lock = InstanceLock()
+    return lock.get_lock_info()
+
+
+def _pid_args(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _pid_tty(pid: int) -> str | None:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "tty="],
+            capture_output=True,
+            text=True,
+            timeout=1,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _prompt_conflict_action(lock_info: dict[str, str | None]) -> str:
+    pid_value = lock_info.get("locking_pid") or "unknown"
+    pid = int(pid_value) if pid_value.isdigit() else None
+    tty = _pid_tty(pid) if pid else None
+    tty_display = tty or "unknown"
+    print("tmux-dashboard: another instance is running.", file=sys.stderr)
+    print(f"PID: {pid_value}  TTY: {tty_display}", file=sys.stderr)
+    print("Choose: [a] attach  [k] take over  [q] exit", file=sys.stderr)
+    while True:
+        choice = input("> ").strip().lower()
+        if not choice or choice in {"a", "attach"}:
+            return "attach"
+        if choice in {"k", "kill", "takeover"}:
+            return "takeover"
+        if choice in {"q", "quit", "exit"}:
+            return "exit"
+
+
+def _resolve_conflict_action(lock_info: dict[str, str | None]) -> str:
+    action = os.environ.get(CONFLICT_ACTION_ENV, "attach").strip().lower()
+    if action == "prompt":
+        return _prompt_conflict_action(lock_info)
+    if action in {"attach", "exit", "takeover"}:
+        return action
+    return "attach"
+
+
+def _terminate_lock_holder(lock_info: dict[str, str | None], logger: Logger) -> bool:
+    pid_value = lock_info.get("locking_pid")
+    if not pid_value or not pid_value.isdigit():
+        logger.warn("lock_takeover", "no valid pid to terminate")
+        return False
+    pid = int(pid_value)
+    args = _pid_args(pid)
+    if not args or "tmux-dashboard" not in args:
+        logger.warn("lock_takeover", f"pid {pid} does not look like tmux-dashboard")
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        logger.error("lock_takeover", str(exc))
+        return False
+
+    lock = InstanceLock()
+    start = time.monotonic()
+    while (time.monotonic() - start) < 3.0:
+        if not lock.is_locked():
+            return True
+        time.sleep(0.1)
+    logger.warn("lock_takeover", "lock still held after termination attempt")
+    return False
+
+
+def _handle_lock_conflict(
+    tmux: TmuxManager,
+    config: Config,
+    logger: Logger,
+) -> str:
+    lock_info = _read_lock_info()
+    action = _resolve_conflict_action(lock_info)
+    if action == "takeover":
+        if _terminate_lock_holder(lock_info, logger):
+            return "retry"
+        action = "attach"
+
+    if action == "exit":
+        logger.info("exit", "dashboard locked, exiting")
+        return "exit"
+
+    try:
+        target_session = tmux.most_recent_session()
+        if target_session:
+            logger.info("auto_attach", "another dashboard running, attaching to session")
+            if _attach_and_rename(
+                tmux,
+                target_session.name,
+                logger,
+                config.auto_rename_on_detach,
+                event="auto_attach",
+            ):
+                return "exit"
+            return "exit"
+        logger.info("exit", "another dashboard running, no sessions to attach")
+        return "exit"
+    except TmuxError as exc:
+        logger.error("attach", f"failed to attach: {exc}")
+        return "exit"
+
+
 def run() -> None:
     # Load config first to get settings
     config = load_config()
@@ -46,32 +175,14 @@ def run() -> None:
     tmux = TmuxManager()
     headless_registry = HeadlessRegistry(config.headless_state_dir, config.headless_output_dir)
 
-    try:
-        lock = ensure_single_instance(exit_on_conflict=False, verbose=False)
-    except LockAcquisitionError:
-        # Another dashboard instance is running
-        # Check if tmux has sessions - if so, attach to the most recent one
-        # This allows SSH sessions to work normally
+    while True:
         try:
-            target_session = tmux.most_recent_session()
-            if target_session:
-                # Tmux has sessions - attach to the most recent one
-                logger.info("auto_attach", "another dashboard running, attaching to session")
-                if _attach_and_rename(
-                    tmux,
-                    target_session.name,
-                    logger,
-                    config.auto_rename_on_detach,
-                    event="auto_attach",
-                ):
-                    return
-                return  # Exit after attaching
-            else:
-                # No tmux sessions exist - just exit
-                logger.info("exit", "another dashboard running, no sessions to attach")
-                return  # Nothing to do, exit cleanly
-        except TmuxError as exc:
-            logger.error("attach", f"failed to attach: {exc}")
+            lock = ensure_single_instance(exit_on_conflict=False, verbose=False)
+            break
+        except LockAcquisitionError:
+            outcome = _handle_lock_conflict(tmux, config, logger)
+            if outcome == "retry":
+                continue
             return
 
     # We have the lock - this is the only dashboard instance
@@ -162,6 +273,7 @@ Environment Variables:
   TMUX_DASHBOARD_SORT_MODE    Sort mode: activity/name/ai_first/windows_count (default: ai_first)
   TMUX_DASHBOARD_DRY_RUN      Set to 1/true/yes to enable dry-run mode (blocks delete)
   TMUX_DASHBOARD_AUTO_RENAME_ON_DETACH  Set to 0/false to preserve manual session names (default: true)
+  TMUX_DASHBOARD_CONFLICT_ACTION  attach|exit|prompt|takeover (default: attach)
   TMUX_DASHBOARD_LOCK_FILE    Override lock file path (default: ~/.local/state/tmux-dashboard/lock)
   TMUX_DASHBOARD_PID_FILE     Override PID file path (default: ~/.local/state/tmux-dashboard/pid)
   TMUX_DASHBOARD_HEADLESS_STATE_DIR     Headless metadata dir (default: ~/.local/state/tmux-dashboard/headless)
